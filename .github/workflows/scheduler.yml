@@ -1,14 +1,20 @@
-name: CoH3 BR Scheduler (Public Cron Dispatcher)
+name: CoH3 BR Scheduler (Smart Pre-Check Dispatcher)
 
 on:
   schedule:
-    # Horario ativo no Brasil (12:00-20:59 BRT = 15:00-23:59 UTC): a cada 15 min fora de pico (:07, :22, :37, :52)
-    - cron: "7,22,37,52 15-23 * * *"
-    # Noite/virada no Brasil (21:00-01:59 BRT = 00:00-04:59 UTC): a cada 15 min fora de pico (:07, :22, :37, :52)
-    - cron: "7,22,37,52 0-4 * * *"
-    # Madrugada/manha (02:00-11:59 BRT = 05:00-14:59 UTC): 4 checagens/dia (total 60/dia = <= 1.860 min/mes no repo privado)
-    - cron: "37 6,9,12,14 * * *"
+    # Horario ativo no Brasil (12:00-20:59 BRT = 15:00-23:59 UTC): a cada 5 min fora de pico (gratis no repo publico!)
+    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 15-23 * * *"
+    # Noite/virada no Brasil (21:00-01:59 BRT = 00:00-04:59 UTC): a cada 5 min fora de pico
+    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 0-4 * * *"
+    # Madrugada/manha (02:00-11:59 BRT = 05:00-14:59 UTC): a cada 30 min (:07, :37)
+    - cron: "7,37 5-14 * * *"
   workflow_dispatch:
+    inputs:
+      force_dispatch:
+        description: "Forcar disparo imediato no repositorio privado mesmo sem novas partidas?"
+        required: false
+        default: true
+        type: boolean
 
 permissions: {}
 
@@ -20,14 +26,33 @@ jobs:
   dispatch-private-monitor:
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    permissions:
+      contents: write
     steps:
-      - name: Disparar ciclo no repositorio privado (workflow_dispatch sincrono)
+      - name: Checkout seguro na branch ativa (SHA imutavel)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Pre-checagem inteligente na API publica da Relic (33 contas BR)
+        id: precheck
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          FORCE_DISPATCH: ${{ github.event_name == 'workflow_dispatch' && inputs.force_dispatch }}
+        run: |
+          set -euo pipefail
+          python3 precheck.py
+
+      - name: Disparar ciclo no repositorio privado somente quando necessario
+        if: steps.precheck.outputs.should_dispatch == 'true'
         env:
           TRACKER_DISPATCH_TOKEN: ${{ secrets.TRACKER_DISPATCH_TOKEN }}
           TARGET_OWNER: "nigosky"
           TARGET_REPO: "coh3-br-tracker"
           TARGET_WORKFLOW: "coh3_monitor.yml"
           TARGET_REF: "main"
+          PRECHECK_REASON: ${{ steps.precheck.outputs.reason }}
         run: |
           set -euo pipefail
 
@@ -77,15 +102,44 @@ jobs:
             exit 1
           fi
 
+          if [ -f "state.json" ]; then
+            git add -- state.json
+            if ! git diff --cached --quiet; then
+              BRANCH_NAME="${GITHUB_REF_NAME:-main}"
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git commit -m "chore(precheck): atualizar marcador de partidas [skip ci]"
+              for attempt in 1 2 3; do
+                git pull --rebase -X theirs origin "${BRANCH_NAME}" || true
+                if git push origin "HEAD:${BRANCH_NAME}"; then
+                  break
+                fi
+                sleep 2
+              done
+            fi
+          fi
+
+          echo "Disparo enviado com sucesso para ${TARGET_OWNER}/${TARGET_REPO}@${TARGET_REF} (${PRECHECK_REASON})."
+
+      - name: Resumo da Pre-Checagem Inteligente
+        if: always()
+        env:
+          SHOULD_DISPATCH: ${{ steps.precheck.outputs.should_dispatch }}
+          PRECHECK_REASON: ${{ steps.precheck.outputs.reason }}
+          OK_ACCOUNTS: ${{ steps.precheck.outputs.ok_accounts }}
+        run: |
           UTC_NOW="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           BRT_NOW="$(TZ='America/Sao_Paulo' date '+%Y-%m-%d %H:%M:%S BRT')"
-          echo "Disparo enviado com sucesso para ${TARGET_OWNER}/${TARGET_REPO}@${TARGET_REF} em ${BRT_NOW} (${UTC_NOW})."
-
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
             {
-              echo "### CoH3 BR Scheduler — Disparo Concluído"
-              echo "- **Alvo:** \`${TARGET_OWNER}/${TARGET_REPO}\` (\`${TARGET_WORKFLOW}\` na branch \`${TARGET_REF}\`)"
+              echo "### CoH3 BR Smart Scheduler — Pré-Checagem Relic API"
               echo "- **Horário (BRT):** ${BRT_NOW} (${UTC_NOW})"
-              echo "- **Status API:** \`HTTP 204 No Content\` (enfileirado instantaneamente via \`workflow_dispatch\`)"
+              echo "- **Contas verificadas na Relic:** \`${OK_ACCOUNTS:-N/D}\`"
+              if [ "${SHOULD_DISPATCH:-false}" = "true" ]; then
+                echo "- **Decisão:** 🟢 **DISPARADO** (\`HTTP 204\` → \`nigosky/coh3-br-tracker\`)"
+              else
+                echo "- **Decisão:** 💤 **ECONOMIZADO (SKIP)** — zero minutos gastos no repositório privado"
+              fi
+              echo "- **Motivo:** ${PRECHECK_REASON:-N/D}"
             } >> "${GITHUB_STEP_SUMMARY}"
           fi
