@@ -1,0 +1,91 @@
+name: CoH3 BR Scheduler (Public Cron Dispatcher)
+
+on:
+  schedule:
+    # Horario ativo no Brasil (12:00-20:59 BRT = 15:00-23:59 UTC): a cada 15 min fora de pico (:07, :22, :37, :52)
+    - cron: "7,22,37,52 15-23 * * *"
+    # Noite/virada no Brasil (21:00-01:59 BRT = 00:00-04:59 UTC): a cada 15 min fora de pico (:07, :22, :37, :52)
+    - cron: "7,22,37,52 0-4 * * *"
+    # Madrugada/manha (02:00-11:59 BRT = 05:00-14:59 UTC): 4 checagens/dia (total 60/dia = <= 1.860 min/mes no repo privado)
+    - cron: "37 6,9,12,14 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: coh3-br-scheduler-dispatch
+  cancel-in-progress: false
+
+jobs:
+  dispatch-private-monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Disparar ciclo no repositorio privado (workflow_dispatch sincrono)
+        env:
+          TRACKER_DISPATCH_TOKEN: ${{ secrets.TRACKER_DISPATCH_TOKEN }}
+          TARGET_OWNER: "nigosky"
+          TARGET_REPO: "coh3-br-tracker"
+          TARGET_WORKFLOW: "coh3_monitor.yml"
+          TARGET_REF: "main"
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TRACKER_DISPATCH_TOKEN:-}" ]; then
+            echo "::error::O Secret TRACKER_DISPATCH_TOKEN ainda nao foi configurado neste repositorio (Settings -> Secrets and variables -> Actions)."
+            exit 1
+          fi
+
+          API_URL="https://api.github.com/repos/${TARGET_OWNER}/${TARGET_REPO}/actions/workflows/${TARGET_WORKFLOW}/dispatches"
+          BODY_FILE="$(mktemp)"
+          trap 'rm -f "${BODY_FILE}"' EXIT
+
+          DISPATCHED=false
+          LAST_HTTP="000"
+
+          for attempt in 1 2 3; do
+            HTTP_CODE="$(
+              curl -sS \
+                --proto '=https' \
+                --tlsv1.2 \
+                --max-time 20 \
+                -o "${BODY_FILE}" \
+                -w "%{http_code}" \
+                -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${TRACKER_DISPATCH_TOKEN}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                -H "Content-Type: application/json" \
+                "${API_URL}" \
+                -d "{\"ref\":\"${TARGET_REF}\"}" || echo "000"
+            )"
+            LAST_HTTP="${HTTP_CODE}"
+
+            if [ "${HTTP_CODE}" = "204" ]; then
+              DISPATCHED=true
+              break
+            fi
+
+            echo "::warning::Tentativa ${attempt}/3 retornou HTTP ${HTTP_CODE} ao disparar ${TARGET_OWNER}/${TARGET_REPO}."
+            sleep "$((attempt * 3))"
+          done
+
+          if [ "${DISPATCHED}" != "true" ]; then
+            echo "::error::Falha ao disparar workflow privado (HTTP ${LAST_HTTP}). Verifique se TRACKER_DISPATCH_TOKEN possui permissao 'Actions: Read and write' no repositorio ${TARGET_OWNER}/${TARGET_REPO}."
+            head -c 400 "${BODY_FILE}" || true
+            echo ""
+            exit 1
+          fi
+
+          UTC_NOW="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          BRT_NOW="$(TZ='America/Sao_Paulo' date '+%Y-%m-%d %H:%M:%S BRT')"
+          echo "Disparo enviado com sucesso para ${TARGET_OWNER}/${TARGET_REPO}@${TARGET_REF} em ${BRT_NOW} (${UTC_NOW})."
+
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              echo "### CoH3 BR Scheduler — Disparo Concluído"
+              echo "- **Alvo:** \`${TARGET_OWNER}/${TARGET_REPO}\` (\`${TARGET_WORKFLOW}\` na branch \`${TARGET_REF}\`)"
+              echo "- **Horário (BRT):** ${BRT_NOW} (${UTC_NOW})"
+              echo "- **Status API:** \`HTTP 204 No Content\` (enfileirado instantaneamente via \`workflow_dispatch\`)"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
