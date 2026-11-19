@@ -15,6 +15,7 @@ Resultado:
 from __future__ import annotations
 
 import argparse
+import ast
 import concurrent.futures
 import gzip
 import io
@@ -34,8 +35,13 @@ from typing import Any
 
 RELIC_HOST = "coh3-api.reliclink.com"
 GITHUB_API_HOST = "api.github.com"
+RADAR_HOST = "raw.githubusercontent.com"
+RADAR_STATE_PATH = "/nigosky/coh3-br-lobby-radar/main/state.json"
+RADAR_STATE_URL = f"https://{RADAR_HOST}{RADAR_STATE_PATH}"
 BASE_URL = f"https://{RELIC_HOST}/community/leaderboard"
 MAX_HTTP_BYTES = 5 * 1024 * 1024  # 5 MB limite estrito anti-Gzip-bomb
+MAX_RADAR_BYTES = 256 * 1024  # 256 KB limite estrito para state.json do Radar dos Veteranos
+RADAR_MAX_AGE_SEC = 7200  # Ignora estado do Radar se estiver há >2h sem sincronizar
 BRT_TZ = timezone(timedelta(hours=-3))
 HEARTBEAT_INTERVAL_SEC = 3 * 3600  # Garante 1 disparo de segurança a cada 3h (limpeza 72h, Open Data, retries)
 
@@ -88,6 +94,8 @@ MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (975688, "Kefbr"),
 )
 
+MONITORED_PID_SET: frozenset[int] = frozenset(pid for pid, _ in MONITORED_PROFILES)
+
 _TLS_LOCALS = threading.local()
 
 
@@ -106,7 +114,7 @@ def _get_opener() -> urllib.request.OpenerDirector:
     return opener
 
 
-def _read_bounded_json(resp: Any) -> dict[str, Any]:
+def _read_bounded_json(resp: Any, max_bytes: int = MAX_HTTP_BYTES) -> dict[str, Any]:
     raw_chunks: list[bytes] = []
     total = 0
     while True:
@@ -114,8 +122,8 @@ def _read_bounded_json(resp: Any) -> dict[str, Any]:
         if not chunk:
             break
         total += len(chunk)
-        if total > MAX_HTTP_BYTES:
-            raise ValueError("Resposta HTTP excedeu limite seguro de 5 MB.")
+        if total > max_bytes:
+            raise ValueError(f"Resposta HTTP excedeu limite seguro ({max_bytes} bytes).")
         raw_chunks.append(chunk)
     raw = b"".join(raw_chunks)
 
@@ -129,11 +137,135 @@ def _read_bounded_json(resp: Any) -> dict[str, Any]:
                 if not piece:
                     break
                 uz_total += len(piece)
-                if uz_total > MAX_HTTP_BYTES:
-                    raise ValueError("Payload descompactado excedeu limite seguro de 5 MB.")
+                if uz_total > max_bytes:
+                    raise ValueError(f"Payload descompactado excedeu limite seguro ({max_bytes} bytes).")
                 out_chunks.append(piece)
             raw = b"".join(out_chunks)
-    return json.loads(raw.decode("utf-8"))
+    parsed = json.loads(raw.decode("utf-8"))
+    if not isinstance(parsed, dict):
+        raise ValueError("Formato JSON inesperado.")
+    return parsed
+
+
+def _extract_pids_from_seq(seq: Any) -> set[int]:
+    out: set[int] = set()
+    if not isinstance(seq, (list, tuple, set)):
+        return out
+    for item in seq:
+        candidate = item[0] if isinstance(item, (list, tuple)) and item else item
+        if isinstance(candidate, bool):
+            continue
+        if isinstance(candidate, int) and candidate > 0:
+            out.add(candidate)
+        elif isinstance(candidate, str) and candidate.isdigit() and int(candidate) > 0:
+            out.add(int(candidate))
+    return out
+
+
+def fetch_veteranos_radar_active_pids(max_age_sec: int = RADAR_MAX_AGE_SEC) -> tuple[set[int], int, bool]:
+    """
+    Lê (estritamente somente-leitura) o `state.json` público do Radar dos Veteranos
+    (`nigosky/coh3-br-lobby-radar`) e retorna `(active_pids, last_sync_ts, ok)`.
+    """
+    parsed = urllib.parse.urlparse(RADAR_STATE_URL)
+    if parsed.scheme != "https" or parsed.hostname != RADAR_HOST or parsed.path != RADAR_STATE_PATH:
+        raise ValueError("URL do Radar fora da allowlist.")
+
+    headers = {
+        "User-Agent": "CoH3-BR-SmartScheduler/2.1",
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip",
+        "Cache-Control": "no-cache",
+    }
+    for attempt in range(2):
+        req = urllib.request.Request(RADAR_STATE_URL, headers=headers, method="GET")
+        try:
+            with _get_opener().open(req, timeout=8) as resp:
+                data = _read_bounded_json(resp, max_bytes=MAX_RADAR_BYTES)
+
+            last_sync_ts = int(data.get("last_sync_ts", 0) or 0)
+            now_ts = int(time.time())
+            if max_age_sec > 0 and last_sync_ts > 0 and (now_ts - last_sync_ts) > max_age_sec:
+                return set(), last_sync_ts, False
+
+            active_pids: set[int] = set()
+            active_pids.update(_extract_pids_from_seq(data.get("last_alert_coh3_pids")))
+
+            raw_digest = data.get("last_digest")
+            if isinstance(raw_digest, str) and 2 <= len(raw_digest) <= 65536:
+                try:
+                    dig = ast.literal_eval(raw_digest)
+                    if isinstance(dig, tuple) and dig and isinstance(dig[0], tuple):
+                        vet_tuple = dig[0]
+                        if len(vet_tuple) >= 1:
+                            active_pids.update(_extract_pids_from_seq(vet_tuple[0]))
+                        if len(vet_tuple) >= 3:
+                            active_pids.update(_extract_pids_from_seq(vet_tuple[2]))
+                except (ValueError, SyntaxError, TypeError):
+                    pass
+
+            return active_pids & MONITORED_PID_SET, last_sync_ts, True
+        except Exception:
+            if attempt == 0:
+                time.sleep(0.6)
+    return set(), 0, False
+
+
+def fetch_personal_stat_last_match(pids: list[int]) -> dict[int, int]:
+    """
+    Consulta `getPersonalStat` da Relic (lotes de até 10 contas) apenas para o subconjunto
+    sinalizado pelo Radar dos Veteranos, retornando `{profile_id: max_lastmatchdate}`.
+    """
+    clean_pids = sorted({int(p) for p in pids if int(p) > 0})
+    if not clean_pids:
+        return {}
+
+    headers = {
+        "User-Agent": "CoH3-BR-SmartScheduler/2.1",
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip",
+    }
+    latest: dict[int, int] = {}
+    for idx in range(0, len(clean_pids), 10):
+        chunk = clean_pids[idx : idx + 10]
+        target_set = set(chunk)
+        encoded_ids = urllib.parse.quote("[" + ",".join(str(p) for p in chunk) + "]")
+        url = f"{BASE_URL}/getPersonalStat?title=coh3&profile_ids={encoded_ids}"
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme != "https" or parsed.hostname != RELIC_HOST:
+            raise ValueError("Host fora da allowlist da Relic.")
+
+        try:
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            with _get_opener().open(req, timeout=12) as resp:
+                data = _read_bounded_json(resp)
+        except Exception:
+            continue
+
+        sg_to_pids: dict[int, list[int]] = {}
+        for sg in data.get("statGroups") or []:
+            if not isinstance(sg, dict) or "id" not in sg:
+                continue
+            matched = [
+                int(m.get("profile_id", 0) or 0)
+                for m in (sg.get("members") or [])
+                if isinstance(m, dict) and int(m.get("profile_id", 0) or 0) in target_set
+            ]
+            if matched:
+                sg_to_pids[int(sg["id"])] = matched
+
+        for st in data.get("leaderboardStats") or []:
+            if not isinstance(st, dict):
+                continue
+            sg_id = int(st.get("statgroup_id", -1))
+            lmd = int(st.get("lastmatchdate", 0) or 0)
+            if lmd <= 0 or sg_id not in sg_to_pids:
+                continue
+            for pid in sg_to_pids[sg_id]:
+                if lmd > latest.get(pid, 0):
+                    latest[pid] = lmd
+
+    return latest
 
 
 def fetch_latest_player_marker(profile_id: int) -> tuple[int, int, int, bool]:
@@ -148,7 +280,7 @@ def fetch_latest_player_marker(profile_id: int) -> tuple[int, int, int, bool]:
         raise ValueError("Host fora da allowlist da Relic.")
 
     headers = {
-        "User-Agent": "CoH3-BR-SmartScheduler/2.0",
+        "User-Agent": "CoH3-BR-SmartScheduler/2.1",
         "Accept": "application/json",
         "Accept-Encoding": "gzip",
     }
@@ -195,7 +327,7 @@ def dispatch_private_tracker(
 
     body = json.dumps({"ref": ref}).encode("utf-8")
     headers = {
-        "User-Agent": "CoH3-BR-SmartScheduler/2.0",
+        "User-Agent": "CoH3-BR-SmartScheduler/2.1",
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {clean_token}",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -262,15 +394,15 @@ def evaluate_precheck(
     target_repo: str = "coh3-br-tracker",
     target_workflow: str = "coh3_monitor.yml",
     target_ref: str = "main",
+    prev_radar_pids_override: set[int] | None = None,
 ) -> tuple[bool, bool, str, dict[str, Any]]:
     """
-    Executa 1 ciclo de pré-checagem.
+    Executa 1 ciclo de pré-checagem (Relic History + Radar dos Veteranos + Relic PersonalStat).
     Retorna `(should_dispatch, dispatched_ok, reason_str, meta)`.
     Importante: só avança `state.json` se `dispatched_ok` for True (evita perder partidas caso o dispatch falhe).
     """
     now_ts = int(time.time())
     now_brt = datetime.fromtimestamp(now_ts, tz=BRT_TZ)
-    today_brt = now_brt.strftime("%Y-%m-%d")
     iso_year, iso_week, _ = now_brt.isocalendar()
     current_iso_week = f"{iso_year}-W{iso_week:02d}"
 
@@ -278,16 +410,40 @@ def evaluate_precheck(
     prev_players: dict[str, dict[str, int]] = dict(prev.get("players") or {})
     last_dispatch_ts = int(prev.get("last_dispatch_ts", 0) or 0)
     last_weekly_week = str(prev.get("last_weekly_summary_iso_week") or "")
+    prev_radar_pids = (
+        set(prev_radar_pids_override)
+        if prev_radar_pids_override is not None
+        else _extract_pids_from_seq(prev.get("radar_coh3_pids"))
+    )
 
     alias_by_pid = {pid: alias for pid, alias in MONITORED_PROFILES}
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
         results = list(pool.map(fetch_latest_player_marker, [pid for pid, _ in MONITORED_PROFILES]))
 
+    # Checagem cruzada somente-leitura com o Radar dos Veteranos (nigosky/coh3-br-lobby-radar)
+    curr_radar_pids, radar_sync_ts, radar_ok = fetch_veteranos_radar_active_pids()
+    exited_radar_pids = (prev_radar_pids - curr_radar_pids) if radar_ok else set()
+    focus_radar_pids = (curr_radar_pids | exited_radar_pids) if radar_ok else set()
+
+    results_by_pid: dict[int, tuple[int, int, int, bool]] = {pid: (pid, mid, ct, ok) for pid, mid, ct, ok in results}
+
+    # Rechecagem prioritária imediata se um Veterano ativo/saindo do Radar falhou na 1ª passada da Relic
+    radar_failed_aliases: list[str] = []
+    for fpid in sorted(focus_radar_pids):
+        _, _, _, ok_first = results_by_pid.get(fpid, (fpid, 0, 0, False))
+        if not ok_first:
+            retry_res = fetch_latest_player_marker(fpid)
+            results_by_pid[fpid] = retry_res
+            if not retry_res[3]:
+                radar_failed_aliases.append(alias_by_pid.get(fpid, str(fpid)))
+
     ok_count = 0
     new_activity_players: list[str] = []
-    updated_players: dict[str, dict[str, int]] = dict(prev_players)
+    new_activity_pids: set[int] = set()
+    updated_players: dict[str, dict[str, int]] = {k: dict(v) for k, v in prev_players.items()}
 
-    for pid, max_mid, max_ct, ok in results:
+    for pid, _ in MONITORED_PROFILES:
+        _, max_mid, max_ct, ok = results_by_pid[pid]
         key = str(pid)
         if not ok:
             continue
@@ -295,12 +451,40 @@ def evaluate_precheck(
         old_entry = prev_players.get(key) or {}
         old_mid = int(old_entry.get("max_match_id", 0) or 0)
         old_ct = int(old_entry.get("max_completion_time", 0) or 0)
+        old_stat_lmd = int(old_entry.get("max_stat_lmd", 0) or 0)
         if prev_players and (max_mid > old_mid or max_ct > old_ct):
             new_activity_players.append(f"{alias_by_pid.get(pid, str(pid))} (#{max_mid})")
-        updated_players[key] = {
+            new_activity_pids.add(pid)
+        entry_next: dict[str, int] = {
             "max_match_id": max(max_mid, old_mid),
             "max_completion_time": max(max_ct, old_ct),
         }
+        if old_stat_lmd > 0:
+            entry_next["max_stat_lmd"] = max(old_stat_lmd, entry_next["max_completion_time"])
+        updated_players[key] = entry_next
+
+    # Cross-check Relic getPersonalStat (1 única requisição leve!) para Veteranos sinalizados pelo Radar
+    radar_stat_triggers: list[str] = []
+    if focus_radar_pids:
+        stat_lmd_map = fetch_personal_stat_last_match(sorted(focus_radar_pids))
+        for fpid in sorted(focus_radar_pids):
+            stat_lmd = int(stat_lmd_map.get(fpid, 0) or 0)
+            if stat_lmd <= 0:
+                continue
+            key = str(fpid)
+            old_entry = prev_players.get(key) or {}
+            old_ct = int(old_entry.get("max_completion_time", 0) or 0)
+            old_stat_lmd = int(old_entry.get("max_stat_lmd", 0) or 0)
+            baseline_ts = max(old_ct, old_stat_lmd)
+
+            cur_slot = updated_players.setdefault(
+                key,
+                {"max_match_id": int(old_entry.get("max_match_id", 0) or 0), "max_completion_time": old_ct},
+            )
+            cur_slot["max_stat_lmd"] = max(stat_lmd, baseline_ts, int(cur_slot.get("max_completion_time", 0) or 0))
+
+            if prev_players and fpid not in new_activity_pids and stat_lmd > (baseline_ts + 10):
+                radar_stat_triggers.append(alias_by_pid.get(fpid, str(fpid)))
 
     reasons: list[str] = []
     mark_weekly_done = False
@@ -313,6 +497,13 @@ def evaluate_precheck(
         sample = ", ".join(new_activity_players[:4])
         extra = f" +{len(new_activity_players) - 4}" if len(new_activity_players) > 4 else ""
         reasons.append(f"nova partida detectada: {sample}{extra}")
+    if radar_stat_triggers:
+        sample_r = ", ".join(radar_stat_triggers[:4])
+        extra_r = f" +{len(radar_stat_triggers) - 4}" if len(radar_stat_triggers) > 4 else ""
+        reasons.append(f"Radar Veteranos + Relic PersonalStat detectou partida recente: {sample_r}{extra_r}")
+    if radar_failed_aliases:
+        sample_f = ", ".join(radar_failed_aliases[:4])
+        reasons.append(f"Radar Veteranos: fallback p/ rechecagem Relic ({sample_f})")
     if now_brt.weekday() == 0 and (now_brt.hour, now_brt.minute) >= (0, 5) and last_weekly_week != current_iso_week:
         reasons.append(f"janela do Resumo Semanal ({current_iso_week} segunda >= 00:05 BRT)")
         mark_weekly_done = True
@@ -350,10 +541,12 @@ def evaluate_precheck(
 
     if should_dispatch and dispatched_ok and not dry_run:
         next_state = {
-            "schema_version": 1,
+            "schema_version": 2,
             "last_checked_ts": now_ts,
             "last_dispatch_ts": now_ts,
             "last_weekly_summary_iso_week": current_iso_week if mark_weekly_done else last_weekly_week,
+            "radar_coh3_pids": sorted(curr_radar_pids) if radar_ok else sorted(prev_radar_pids),
+            "radar_last_sync_ts": radar_sync_ts if radar_ok else int(prev.get("radar_last_sync_ts", 0) or 0),
             "players": updated_players,
         }
         atomic_write_json(state_path, next_state)
@@ -362,6 +555,9 @@ def evaluate_precheck(
         "ok_accounts": ok_count,
         "total_accounts": len(MONITORED_PROFILES),
         "http_code": http_code,
+        "radar_ok": radar_ok,
+        "radar_active_pids": sorted(curr_radar_pids),
+        "radar_exited_pids": sorted(exited_radar_pids),
     }
     return should_dispatch, dispatched_ok, reason_str, meta
 
@@ -398,6 +594,7 @@ def main() -> int:
     total_skips = 0
     last_ok_str = f"0/{len(MONITORED_PROFILES)}"
     dispatch_events: list[str] = []
+    mem_radar_pids: set[int] | None = None
 
     for idx in range(1, cycles + 1):
         cycle_start = time.monotonic()
@@ -411,8 +608,12 @@ def main() -> int:
             target_repo=target_repo,
             target_workflow=target_workflow,
             target_ref=target_ref,
+            prev_radar_pids_override=mem_radar_pids,
         )
+        if meta.get("radar_ok"):
+            mem_radar_pids = set(meta.get("radar_active_pids") or [])
         last_ok_str = f"{meta['ok_accounts']}/{meta['total_accounts']}"
+        radar_tag = f"Radar={len(meta.get('radar_active_pids') or [])}" if meta.get("radar_ok") else "Radar=OFF"
 
         if should_dispatch:
             if dispatched_ok:
@@ -420,19 +621,19 @@ def main() -> int:
                 dispatch_events.append(f"[{now_brt_str}] {reason}")
                 print(
                     f"[CICLO {idx}/{cycles} • {now_brt_str}] DISPARADO (HTTP {meta['http_code']}) -> "
-                    f"{target_owner}/{target_repo}@{target_ref} | Contas OK={last_ok_str} | Motivo: {reason}",
+                    f"{target_owner}/{target_repo}@{target_ref} | Contas OK={last_ok_str} | {radar_tag} | Motivo: {reason}",
                     flush=True,
                 )
             else:
                 print(
                     f"::warning::[CICLO {idx}/{cycles} • {now_brt_str}] Falha ao disparar {target_owner}/{target_repo} "
-                    f"(HTTP {meta['http_code']}); estado preservado para retentativa no proximo ciclo! Motivo: {reason}",
+                    f"(HTTP {meta['http_code']}); estado preservado para retentativa no proximo ciclo! | {radar_tag} | Motivo: {reason}",
                     flush=True,
                 )
         else:
             total_skips += 1
             print(
-                f"[CICLO {idx}/{cycles} • {now_brt_str}] ECONOMIZADO (SKIP) | Contas OK={last_ok_str} | {reason}",
+                f"[CICLO {idx}/{cycles} • {now_brt_str}] ECONOMIZADO (SKIP) | Contas OK={last_ok_str} | {radar_tag} | {reason}",
                 flush=True,
             )
 
