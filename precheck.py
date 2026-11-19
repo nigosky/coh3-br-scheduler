@@ -277,7 +277,6 @@ def evaluate_precheck(
     prev = load_state(state_path)
     prev_players: dict[str, dict[str, int]] = dict(prev.get("players") or {})
     last_dispatch_ts = int(prev.get("last_dispatch_ts", 0) or 0)
-    last_daily_rank_date = str(prev.get("last_daily_rank_date_brt") or "")
     last_weekly_week = str(prev.get("last_weekly_summary_iso_week") or "")
 
     alias_by_pid = {pid: alias for pid, alias in MONITORED_PROFILES}
@@ -304,7 +303,6 @@ def evaluate_precheck(
         }
 
     reasons: list[str] = []
-    mark_daily_done = False
     mark_weekly_done = False
 
     if force_dispatch:
@@ -315,9 +313,6 @@ def evaluate_precheck(
         sample = ", ".join(new_activity_players[:4])
         extra = f" +{len(new_activity_players) - 4}" if len(new_activity_players) > 4 else ""
         reasons.append(f"nova partida detectada: {sample}{extra}")
-    if (now_brt.hour, now_brt.minute) >= (0, 1) and last_daily_rank_date != today_brt:
-        reasons.append(f"janela do Ranking Diario ({today_brt} >= 00:01 BRT)")
-        mark_daily_done = True
     if now_brt.weekday() == 0 and (now_brt.hour, now_brt.minute) >= (0, 5) and last_weekly_week != current_iso_week:
         reasons.append(f"janela do Resumo Semanal ({current_iso_week} segunda >= 00:05 BRT)")
         mark_weekly_done = True
@@ -358,15 +353,6 @@ def evaluate_precheck(
             "schema_version": 1,
             "last_checked_ts": now_ts,
             "last_dispatch_ts": now_ts,
-            "last_daily_rank_date_brt": (
-                today_brt
-                if mark_daily_done
-                else (
-                    last_daily_rank_date or today_brt
-                    if not prev_players and (now_brt.hour, now_brt.minute) >= (0, 1)
-                    else last_daily_rank_date
-                )
-            ),
             "last_weekly_summary_iso_week": current_iso_week if mark_weekly_done else last_weekly_week,
             "players": updated_players,
         }
