@@ -45,6 +45,10 @@ MAX_RADAR_BYTES = 256 * 1024  # 256 KB limite estrito para state.json do Radar d
 RADAR_MAX_AGE_SEC = 7200  # Ignora estado do Radar se estiver há >2h sem sincronizar
 BRT_TZ = timezone(timedelta(hours=-3))
 HEARTBEAT_INTERVAL_SEC = 3 * 3600  # Garante 1 disparo de segurança a cada 3h (limpeza 72h, Open Data, retries)
+AUTOMATCH_TYPE_IDS: frozenset[int] = frozenset({1, 2, 3, 4})  # 1v1, 2v2, 3v3, 4v4 Automatch (exclui Custom=0)
+BG_FOLLOWUP_FRESH_MATCH_SEC = 300  # Partida Automatch encerrada há <5 min pode ainda estar sendo parseada no cohdb.com
+BG_FOLLOWUP_DELAY_SEC = 240  # Agenda 1 disparo único de confirmação no próximo ciclo de 5 min (+4-5 min)
+BG_FOLLOWUP_TTL_SEC = 2700  # Descarta agendamento se ficar obsoleto (>45 min)
 
 URL_FORBIDDEN_CHARS_RE = re.compile(r"[\x00-\x20\x7f]")
 SAFE_GH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
@@ -292,17 +296,17 @@ def fetch_personal_stat_last_match(pids: list[int]) -> dict[int, int]:
     return latest
 
 
-def fetch_latest_player_marker(profile_id: int) -> tuple[int, int, int, bool]:
-    """Retorna (profile_id, max_match_id, max_completion_time, ok) para uma conta monitorada."""
+def fetch_latest_player_marker(profile_id: int) -> tuple[int, int, int, bool, int, int]:
+    """Retorna (profile_id, max_match_id, max_completion_time, ok, max_automatch_id, max_automatch_ct) para uma conta monitorada."""
     pid = int(profile_id)
     if pid <= 0:
-        return pid, 0, 0, False
+        return pid, 0, 0, False, 0, 0
     qs = urllib.parse.urlencode({"title": "coh3", "profile_id": str(pid)})
     url = f"{BASE_URL}/getRecentMatchHistoryByProfileId?{qs}"
     _validate_outbound_https(url, RELIC_HOST, path_prefix="/community/leaderboard/")
 
     headers = {
-        "User-Agent": "CoH3-BR-SmartScheduler/2.1",
+        "User-Agent": "CoH3-BR-SmartScheduler/2.2",
         "Accept": "application/json",
         "Accept-Encoding": "gzip",
     }
@@ -314,20 +318,28 @@ def fetch_latest_player_marker(profile_id: int) -> tuple[int, int, int, bool]:
             stats = data.get("matchHistoryStats") or []
             max_mid = 0
             max_ct = 0
+            max_auto_mid = 0
+            max_auto_ct = 0
             for item in stats:
                 if not isinstance(item, dict):
                     continue
                 mid = int(item.get("id", 0) or 0)
                 ct = int(item.get("completiontime", 0) or 0)
+                mt_id = int(item.get("matchtype_id", 0) or 0)
                 if mid > max_mid:
                     max_mid = mid
                 if ct > max_ct:
                     max_ct = ct
-            return pid, max_mid, max_ct, True
+                if mt_id in AUTOMATCH_TYPE_IDS:
+                    if mid > max_auto_mid:
+                        max_auto_mid = mid
+                    if ct > max_auto_ct:
+                        max_auto_ct = ct
+            return pid, max_mid, max_ct, True, max_auto_mid, max_auto_ct
         except Exception:
             if attempt == 0:
                 time.sleep(0.8)
-    return pid, 0, 0, False
+    return pid, 0, 0, False, 0, 0
 
 
 def dispatch_private_tracker(
@@ -438,6 +450,8 @@ def evaluate_precheck(
     prev_players: dict[str, dict[str, int]] = dict(prev.get("players") or {})
     last_dispatch_ts = int(prev.get("last_dispatch_ts", 0) or 0)
     last_weekly_week = str(prev.get("last_weekly_summary_iso_week") or "")
+    prev_bg_due_ts = int(prev.get("pending_bg_followup_due_ts", 0) or 0)
+    prev_bg_match_id = int(prev.get("pending_bg_followup_match_id", 0) or 0)
     prev_radar_pids = (
         set(prev_radar_pids_override)
         if prev_radar_pids_override is not None
@@ -453,12 +467,14 @@ def evaluate_precheck(
     exited_radar_pids = (prev_radar_pids - curr_radar_pids) if radar_ok else set()
     focus_radar_pids = (curr_radar_pids | exited_radar_pids) if radar_ok else set()
 
-    results_by_pid: dict[int, tuple[int, int, int, bool]] = {pid: (pid, mid, ct, ok) for pid, mid, ct, ok in results}
+    results_by_pid: dict[int, tuple[int, int, int, bool, int, int]] = {
+        pid: (pid, mid, ct, ok, a_mid, a_ct) for pid, mid, ct, ok, a_mid, a_ct in results
+    }
 
     # Rechecagem prioritária imediata se um Veterano ativo/saindo do Radar falhou na 1ª passada da Relic
     radar_failed_aliases: list[str] = []
     for fpid in sorted(focus_radar_pids):
-        _, _, _, ok_first = results_by_pid.get(fpid, (fpid, 0, 0, False))
+        _, _, _, ok_first, _, _ = results_by_pid.get(fpid, (fpid, 0, 0, False, 0, 0))
         if not ok_first:
             retry_res = fetch_latest_player_marker(fpid)
             results_by_pid[fpid] = retry_res
@@ -468,10 +484,11 @@ def evaluate_precheck(
     ok_count = 0
     new_activity_players: list[str] = []
     new_activity_pids: set[int] = set()
+    fresh_automatch_mid = 0
     updated_players: dict[str, dict[str, int]] = {k: dict(v) for k, v in prev_players.items()}
 
     for pid, _ in MONITORED_PROFILES:
-        _, max_mid, max_ct, ok = results_by_pid[pid]
+        _, max_mid, max_ct, ok, max_auto_mid, max_auto_ct = results_by_pid[pid]
         key = str(pid)
         if not ok:
             continue
@@ -483,6 +500,13 @@ def evaluate_precheck(
         if prev_players and (max_mid > old_mid or max_ct > old_ct):
             new_activity_players.append(f"{alias_by_pid.get(pid, str(pid))} (#{max_mid})")
             new_activity_pids.add(pid)
+            if (
+                max_auto_ct > 0
+                and (max_auto_mid > old_mid or max_auto_ct > old_ct)
+                and (now_ts - max_auto_ct) < BG_FOLLOWUP_FRESH_MATCH_SEC
+            ):
+                if max_auto_mid > fresh_automatch_mid:
+                    fresh_automatch_mid = max_auto_mid
         entry_next: dict[str, int] = {
             "max_match_id": max(max_mid, old_mid),
             "max_completion_time": max(max_ct, old_ct),
@@ -532,6 +556,14 @@ def evaluate_precheck(
     if radar_failed_aliases:
         sample_f = ", ".join(radar_failed_aliases[:4])
         reasons.append(f"Radar Veteranos: fallback p/ rechecagem Relic ({sample_f})")
+    bg_followup_due = (
+        prev_bg_due_ts > 0
+        and now_ts >= prev_bg_due_ts
+        and (now_ts - prev_bg_due_ts) <= BG_FOLLOWUP_TTL_SEC
+    )
+    if bg_followup_due and not new_activity_players and not radar_stat_triggers:
+        mid_hint = f" #{prev_bg_match_id}" if prev_bg_match_id > 0 else ""
+        reasons.append(f"confirmacao de Battlegroups cohdb (+5 min apos partida{mid_hint})")
     if now_brt.weekday() == 0 and (now_brt.hour, now_brt.minute) >= (0, 5) and last_weekly_week != current_iso_week:
         reasons.append(f"janela do Resumo Semanal ({current_iso_week} segunda >= 00:05 BRT)")
         mark_weekly_done = True
@@ -568,11 +600,22 @@ def evaluate_precheck(
             http_code = 0
 
     if should_dispatch and dispatched_ok and not dry_run:
+        if fresh_automatch_mid > 0 or radar_stat_triggers:
+            next_bg_due_ts = now_ts + BG_FOLLOWUP_DELAY_SEC
+            next_bg_mid = fresh_automatch_mid
+        elif prev_bg_due_ts > 0 and now_ts < (prev_bg_due_ts - 60):
+            next_bg_due_ts = prev_bg_due_ts
+            next_bg_mid = prev_bg_match_id
+        else:
+            next_bg_due_ts = 0
+            next_bg_mid = 0
         next_state = {
             "schema_version": 2,
             "last_checked_ts": now_ts,
             "last_dispatch_ts": now_ts,
             "last_weekly_summary_iso_week": current_iso_week if mark_weekly_done else last_weekly_week,
+            "pending_bg_followup_due_ts": next_bg_due_ts,
+            "pending_bg_followup_match_id": next_bg_mid,
             "radar_coh3_pids": sorted(curr_radar_pids) if radar_ok else sorted(prev_radar_pids),
             "radar_last_sync_ts": radar_sync_ts if radar_ok else int(prev.get("radar_last_sync_ts", 0) or 0),
             "players": updated_players,
