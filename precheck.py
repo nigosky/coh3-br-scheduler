@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
-Pré-checagem inteligente (stdlib-only, zero segredos, TLS 1.2+) para `nigosky/coh3-br-scheduler`.
+Pré-checagem inteligente (stdlib-only, TLS 1.2+) com loop contínuo de 5 min para `nigosky/coh3-br-scheduler`.
 
 Consulta diretamente a API pública da Relic (`getRecentMatchHistoryByProfileId`) das 33 contas Steam
-monitoradas (cobrindo tanto Automatch ranqueadas quanto partidas Customizadas!) e decide se vale a pena
-disparar (`workflow_dispatch`) o repositório privado `nigosky/coh3-br-tracker`.
+monitoradas (cobrindo tanto Automatch ranqueadas quanto partidas Customizadas!) a cada 5 minutos
+durante uma sessão autônoma de 60 minutos (12 ciclos) e dispara (`workflow_dispatch`) o repositório
+privado `nigosky/coh3-br-tracker` imediatamente assim que qualquer partida nova termina!
 
 Resultado:
-- Checagens rápidas no agendador público (onde minutos do GitHub Actions são 100% gratuitos e ilimitados).
-- Redução de ~70-85% no consumo mensal de minutos do repositório privado, mantendo detecção quase em tempo real!
+- Detecção pontual a cada 5 minutos 24h/dia (sem sofrer com atrasos ou descartes do cron do GitHub Actions).
+- Minutos 100% gratuitos no agendador público, economizando ~80-90% da cota do repositório privado.
 """
 
 from __future__ import annotations
 
+import argparse
 import concurrent.futures
 import gzip
+import io
 import json
 import os
 import ssl
@@ -30,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 RELIC_HOST = "coh3-api.reliclink.com"
+GITHUB_API_HOST = "api.github.com"
 BASE_URL = f"https://{RELIC_HOST}/community/leaderboard"
 MAX_HTTP_BYTES = 5 * 1024 * 1024  # 5 MB limite estrito anti-Gzip-bomb
 BRT_TZ = timezone(timedelta(hours=-3))
@@ -120,9 +124,6 @@ def _read_bounded_json(resp: Any) -> dict[str, Any]:
     return json.loads(raw.decode("utf-8"))
 
 
-import io  # noqa: E402
-
-
 def fetch_latest_player_marker(profile_id: int) -> tuple[int, int, int, bool]:
     """Retorna (profile_id, max_match_id, max_completion_time, ok) para uma conta monitorada."""
     pid = int(profile_id)
@@ -135,7 +136,7 @@ def fetch_latest_player_marker(profile_id: int) -> tuple[int, int, int, bool]:
         raise ValueError("Host fora da allowlist da Relic.")
 
     headers = {
-        "User-Agent": "CoH3-BR-SmartScheduler/1.0",
+        "User-Agent": "CoH3-BR-SmartScheduler/2.0",
         "Accept": "application/json",
         "Accept-Encoding": "gzip",
     }
@@ -161,6 +162,51 @@ def fetch_latest_player_marker(profile_id: int) -> tuple[int, int, int, bool]:
             if attempt == 0:
                 time.sleep(0.8)
     return pid, 0, 0, False
+
+
+def dispatch_private_tracker(
+    token: str,
+    owner: str = "nigosky",
+    repo: str = "coh3-br-tracker",
+    workflow: str = "coh3_monitor.yml",
+    ref: str = "main",
+) -> tuple[bool, int]:
+    """Dispara workflow_dispatch no repositório privado via HTTPS TLS 1.2+ sem expor segredos."""
+    clean_token = (token or "").strip()
+    if not clean_token:
+        return False, 0
+
+    url = f"https://{GITHUB_API_HOST}/repos/{owner}/{repo}/actions/workflows/{workflow}/dispatches"
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname != GITHUB_API_HOST:
+        raise ValueError("Host fora da allowlist da GitHub API.")
+
+    body = json.dumps({"ref": ref}).encode("utf-8")
+    headers = {
+        "User-Agent": "CoH3-BR-SmartScheduler/2.0",
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {clean_token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Content-Type": "application/json",
+    }
+
+    last_code = 0
+    for attempt in range(1, 4):
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        try:
+            with _get_opener().open(req, timeout=20) as resp:
+                last_code = int(resp.getcode() or 0)
+                if last_code == 204:
+                    return True, 204
+        except urllib.error.HTTPError as exc:
+            last_code = int(exc.code or 0)
+        except Exception:
+            last_code = 0
+
+        if attempt < 3:
+            time.sleep(attempt * 3)
+
+    return False, last_code
 
 
 def load_state(state_path: Path) -> dict[str, Any]:
@@ -195,7 +241,21 @@ def write_github_outputs(outputs: dict[str, str]) -> None:
             fh.write(f"{k}={clean_v}\n")
 
 
-def evaluate_precheck(state_path: Path, force_dispatch: bool = False, dry_run: bool = False) -> tuple[bool, str, dict[str, Any]]:
+def evaluate_precheck(
+    state_path: Path,
+    force_dispatch: bool = False,
+    dry_run: bool = False,
+    dispatch_token: str = "",
+    target_owner: str = "nigosky",
+    target_repo: str = "coh3-br-tracker",
+    target_workflow: str = "coh3_monitor.yml",
+    target_ref: str = "main",
+) -> tuple[bool, bool, str, dict[str, Any]]:
+    """
+    Executa 1 ciclo de pré-checagem.
+    Retorna `(should_dispatch, dispatched_ok, reason_str, meta)`.
+    Importante: só avança `state.json` se `dispatched_ok` for True (evita perder partidas caso o dispatch falhe).
+    """
     now_ts = int(time.time())
     now_brt = datetime.fromtimestamp(now_ts, tz=BRT_TZ)
     today_brt = now_brt.strftime("%Y-%m-%d")
@@ -256,43 +316,145 @@ def evaluate_precheck(state_path: Path, force_dispatch: bool = False, dry_run: b
         reasons.append(f"heartbeat periodico de seguranca ({elapsed_h}h desde ultimo ciclo)")
 
     should_dispatch = len(reasons) > 0
-    reason_str = " | ".join(reasons) if reasons else f"sem novas partidas ({ok_count}/{len(MONITORED_PROFILES)} contas verificadas)"
+    reason_str = (
+        " | ".join(reasons)
+        if reasons
+        else f"sem novas partidas ({ok_count}/{len(MONITORED_PROFILES)} contas verificadas)"
+    )
 
-    next_state = {
-        "schema_version": 1,
-        "last_checked_ts": now_ts,
-        "last_dispatch_ts": now_ts if should_dispatch else last_dispatch_ts,
-        "last_daily_rank_date_brt": today_brt if (should_dispatch and mark_daily_done) else (last_daily_rank_date or today_brt if not prev_players and (now_brt.hour, now_brt.minute) >= (0, 1) else last_daily_rank_date),
-        "last_weekly_summary_iso_week": current_iso_week if (should_dispatch and mark_weekly_done) else last_weekly_week,
-        "players": updated_players,
-    }
+    dispatched_ok = False
+    http_code = 0
+    if should_dispatch:
+        if dry_run:
+            dispatched_ok = True
+            http_code = 204
+        elif dispatch_token.strip():
+            dispatched_ok, http_code = dispatch_private_tracker(
+                token=dispatch_token,
+                owner=target_owner,
+                repo=target_repo,
+                workflow=target_workflow,
+                ref=target_ref,
+            )
+        else:
+            # Modo legado sem token no processo Python (ex.: teste local)
+            dispatched_ok = False
+            http_code = 0
 
-    if should_dispatch and not dry_run:
+    if should_dispatch and dispatched_ok and not dry_run:
+        next_state = {
+            "schema_version": 1,
+            "last_checked_ts": now_ts,
+            "last_dispatch_ts": now_ts,
+            "last_daily_rank_date_brt": (
+                today_brt
+                if mark_daily_done
+                else (
+                    last_daily_rank_date or today_brt
+                    if not prev_players and (now_brt.hour, now_brt.minute) >= (0, 1)
+                    else last_daily_rank_date
+                )
+            ),
+            "last_weekly_summary_iso_week": current_iso_week if mark_weekly_done else last_weekly_week,
+            "players": updated_players,
+        }
         atomic_write_json(state_path, next_state)
 
-    return should_dispatch, reason_str, {"ok_accounts": ok_count, "total_accounts": len(MONITORED_PROFILES)}
+    meta = {
+        "ok_accounts": ok_count,
+        "total_accounts": len(MONITORED_PROFILES),
+        "http_code": http_code,
+    }
+    return should_dispatch, dispatched_ok, reason_str, meta
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="CoH3 BR Smart Pre-Check Scheduler")
+    parser.add_argument("--loop-cycles", type=int, default=1, help="Quantidade de ciclos por sessao (1..24)")
+    parser.add_argument("--loop-interval-sec", type=int, default=300, help="Intervalo em segundos entre ciclos")
+    parser.add_argument("--force", action="store_true", help="Forca disparo no 1o ciclo")
+    parser.add_argument("--dry-run", action="store_true", help="Simula checagem sem disparar nem gravar estado")
+    args = parser.parse_args()
+
+    cycles = max(1, min(24, int(args.loop_cycles)))
+    interval_sec = max(30, min(900, int(args.loop_interval_sec)))
+
     repo_dir = Path(__file__).resolve().parent
     state_path = repo_dir / "state.json"
-    force_env = os.environ.get("FORCE_DISPATCH", "false").strip().lower() == "true"
-    dry_run = "--dry-run" in sys.argv
+    force_first = args.force or (os.environ.get("FORCE_DISPATCH", "false").strip().lower() == "true")
 
-    should_dispatch, reason, meta = evaluate_precheck(
-        state_path=state_path,
-        force_dispatch=force_env or ("--force" in sys.argv),
-        dry_run=dry_run,
-    )
-    status_word = "DISPARAR" if should_dispatch else "ECONOMIZAR (SKIP)"
-    print(
-        f"[PRECHECK] Decisao={status_word} | Contas Relic OK={meta['ok_accounts']}/{meta['total_accounts']} | Motivo: {reason}"
+    dispatch_token = os.environ.get("TRACKER_DISPATCH_TOKEN", "").strip()
+    target_owner = os.environ.get("TARGET_OWNER", "nigosky").strip() or "nigosky"
+    target_repo = os.environ.get("TARGET_REPO", "coh3-br-tracker").strip() or "coh3-br-tracker"
+    target_workflow = os.environ.get("TARGET_WORKFLOW", "coh3_monitor.yml").strip() or "coh3_monitor.yml"
+    target_ref = os.environ.get("TARGET_REF", "main").strip() or "main"
+
+    if not args.dry_run and not dispatch_token:
+        print(
+            "::error::O Secret TRACKER_DISPATCH_TOKEN nao esta configurado em Settings -> Secrets and variables -> Actions.",
+            flush=True,
+        )
+        return 1
+
+    total_dispatches = 0
+    total_skips = 0
+    last_ok_str = f"0/{len(MONITORED_PROFILES)}"
+    dispatch_events: list[str] = []
+
+    for idx in range(1, cycles + 1):
+        cycle_start = time.monotonic()
+        now_brt_str = datetime.now(tz=BRT_TZ).strftime("%H:%M:%S BRT")
+        should_dispatch, dispatched_ok, reason, meta = evaluate_precheck(
+            state_path=state_path,
+            force_dispatch=(force_first and idx == 1),
+            dry_run=args.dry_run,
+            dispatch_token=dispatch_token,
+            target_owner=target_owner,
+            target_repo=target_repo,
+            target_workflow=target_workflow,
+            target_ref=target_ref,
+        )
+        last_ok_str = f"{meta['ok_accounts']}/{meta['total_accounts']}"
+
+        if should_dispatch:
+            if dispatched_ok:
+                total_dispatches += 1
+                dispatch_events.append(f"[{now_brt_str}] {reason}")
+                print(
+                    f"[CICLO {idx}/{cycles} • {now_brt_str}] DISPARADO (HTTP {meta['http_code']}) -> "
+                    f"{target_owner}/{target_repo}@{target_ref} | Contas OK={last_ok_str} | Motivo: {reason}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"::warning::[CICLO {idx}/{cycles} • {now_brt_str}] Falha ao disparar {target_owner}/{target_repo} "
+                    f"(HTTP {meta['http_code']}); estado preservado para retentativa no proximo ciclo! Motivo: {reason}",
+                    flush=True,
+                )
+        else:
+            total_skips += 1
+            print(
+                f"[CICLO {idx}/{cycles} • {now_brt_str}] ECONOMIZADO (SKIP) | Contas OK={last_ok_str} | {reason}",
+                flush=True,
+            )
+
+        if idx < cycles:
+            elapsed = time.monotonic() - cycle_start
+            sleep_for = max(1.0, float(interval_sec) - elapsed)
+            time.sleep(sleep_for)
+
+    summary_reason = (
+        " ; ".join(dispatch_events[-3:])
+        if dispatch_events
+        else f"Nenhuma partida nova nos {cycles} ciclo(s) ({total_skips} skips)"
     )
     write_github_outputs(
         {
-            "should_dispatch": "true" if should_dispatch else "false",
-            "reason": reason,
-            "ok_accounts": f"{meta['ok_accounts']}/{meta['total_accounts']}",
+            "total_cycles": str(cycles),
+            "dispatches_count": str(total_dispatches),
+            "skips_count": str(total_skips),
+            "ok_accounts": last_ok_str,
+            "summary_reason": summary_reason,
         }
     )
     return 0
