@@ -1,7 +1,7 @@
 {
-  "last_checked_ts": 1795050696,
+  "last_checked_ts": 1795050737,
   "last_daily_rank_date_brt": "2026-11-18",
-  "last_dispatch_ts": 1795050696,
+  "last_dispatch_ts": 1795050737,
   "last_weekly_summary_iso_week": "",
   "players": {
     "1005730": {
@@ -13,8 +13,8 @@
       "max_match_id": 92118623
     },
     "1088455": {
-      "max_completion_time": 1795048530,
-      "max_match_id": 92118557
+      "max_completion_time": 1795050719,
+      "max_match_id": 92118952
     },
     "110078": {
       "max_completion_time": 1794879618,
@@ -105,8 +105,8 @@
       "max_match_id": 92110482
     },
     "648514": {
-      "max_completion_time": 1795048530,
-      "max_match_id": 92118557
+      "max_completion_time": 1795050719,
+      "max_match_id": 92118952
     },
     "6557": {
       "max_completion_time": 1794965018,
