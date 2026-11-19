@@ -2,7 +2,7 @@
 """
 Pré-checagem inteligente (stdlib-only, TLS 1.2+) com loop contínuo de 5 min para `nigosky/coh3-br-scheduler`.
 
-Consulta diretamente a API pública da Relic (`getRecentMatchHistoryByProfileId`) das 33 contas Steam
+Consulta diretamente a API pública da Relic (`getRecentMatchHistoryByProfileId`) das 44 contas Steam
 monitoradas (cobrindo tanto Automatch ranqueadas quanto partidas Customizadas!) a cada 5 minutos
 durante uma sessão autônoma de 60 minutos (12 ciclos) e dispara (`workflow_dispatch`) o repositório
 privado `nigosky/coh3-br-tracker` imediatamente assim que qualquer partida nova termina!
@@ -39,7 +39,7 @@ MAX_HTTP_BYTES = 5 * 1024 * 1024  # 5 MB limite estrito anti-Gzip-bomb
 BRT_TZ = timezone(timedelta(hours=-3))
 HEARTBEAT_INTERVAL_SEC = 3 * 3600  # Garante 1 disparo de segurança a cada 3h (limpeza 72h, Open Data, retries)
 
-# As 33 contas vinculadas (32 jogadores únicos) monitoradas no CoH3 Brasil Tracker
+# As 44 contas vinculadas (43 jogadores únicos) monitoradas no CoH3 Brasil Tracker
 MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (79327, "Chacineiro"),
     (991764, "SaNgar [BR]"),
@@ -74,6 +74,17 @@ MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (3895, "Liquid"),
     (1005730, "arc"),
     (31145, "vonMises"),
+    (58737, "INFIEL"),
+    (431802, "Conflict.BR"),
+    (59864, "Lion Heart"),
+    (84821, "TJBR"),
+    (99722, "MonteiroBR"),
+    (31061, "ACB"),
+    (81751, "Razi"),
+    (28937, "Mjr Bruno"),
+    (737235, "meuqsaco"),
+    (23250, "Nargoth"),
+    (1097608, "Winter Animal"),
 )
 
 _TLS_LOCALS = threading.local()
