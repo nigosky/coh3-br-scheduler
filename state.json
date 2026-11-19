@@ -1,12 +1,12 @@
 {
-  "last_checked_ts": 1795115448,
-  "last_dispatch_ts": 1795115448,
+  "last_checked_ts": 1795118464,
+  "last_dispatch_ts": 1795118464,
   "last_weekly_summary_iso_week": "",
   "players": {
     "1005730": {
-      "max_completion_time": 1795115167,
-      "max_match_id": 92208290,
-      "max_stat_lmd": 1795115167
+      "max_completion_time": 1795117893,
+      "max_match_id": 92211571,
+      "max_stat_lmd": 1795117893
     },
     "1022333": {
       "max_completion_time": 1795113288,
@@ -82,8 +82,9 @@
       "max_match_id": 91598956
     },
     "337051": {
-      "max_completion_time": 1795101025,
-      "max_match_id": 92184720
+      "max_completion_time": 1795117893,
+      "max_match_id": 92211571,
+      "max_stat_lmd": 1795117893
     },
     "35952": {
       "max_completion_time": 1794450126,
@@ -114,9 +115,9 @@
       "max_match_id": 90655933
     },
     "559962": {
-      "max_completion_time": 1795115167,
-      "max_match_id": 92208290,
-      "max_stat_lmd": 1795115167
+      "max_completion_time": 1795117893,
+      "max_match_id": 92211571,
+      "max_stat_lmd": 1795117893
     },
     "5768": {
       "max_completion_time": 1795096240,
@@ -139,8 +140,9 @@
       "max_match_id": 92124661
     },
     "6557": {
-      "max_completion_time": 1795059167,
-      "max_match_id": 92127299
+      "max_completion_time": 1795118383,
+      "max_match_id": 92210807,
+      "max_stat_lmd": 1795118383
     },
     "691": {
       "max_completion_time": 1794173116,
@@ -155,8 +157,9 @@
       "max_match_id": 78881147
     },
     "79327": {
-      "max_completion_time": 1795099710,
-      "max_match_id": 92183603
+      "max_completion_time": 1795117893,
+      "max_match_id": 92211571,
+      "max_stat_lmd": 1795117893
     },
     "81751": {
       "max_completion_time": 1794790999,
@@ -188,10 +191,11 @@
     }
   },
   "radar_coh3_pids": [
+    79327,
+    337051,
     559962,
-    1005730,
-    1022333
+    1005730
   ],
-  "radar_last_sync_ts": 1795115200,
+  "radar_last_sync_ts": 1795118255,
   "schema_version": 2
 }
