@@ -1,6 +1,6 @@
 {
-  "last_checked_ts": 1795126647,
-  "last_dispatch_ts": 1795126647,
+  "last_checked_ts": 1795132065,
+  "last_dispatch_ts": 1795132065,
   "last_weekly_summary_iso_week": "",
   "pending_bg_followup_due_ts": 0,
   "pending_bg_followup_match_id": 0,
@@ -40,12 +40,13 @@
       "max_match_id": 92198730
     },
     "1282592": {
-      "max_completion_time": 1794968406,
-      "max_match_id": 92007098
+      "max_completion_time": 1795131764,
+      "max_match_id": 92226159
     },
     "13450": {
-      "max_completion_time": 1795051950,
-      "max_match_id": 92120636
+      "max_completion_time": 1795130178,
+      "max_match_id": 92224141,
+      "max_stat_lmd": 1795130178
     },
     "153969": {
       "max_completion_time": 1794162164,
@@ -76,8 +77,9 @@
       "max_match_id": 47037784
     },
     "31145": {
-      "max_completion_time": 1795047978,
-      "max_match_id": 92117452
+      "max_completion_time": 1795130718,
+      "max_match_id": 92225595,
+      "max_stat_lmd": 1795130718
     },
     "32922": {
       "max_completion_time": 1794703560,
@@ -134,9 +136,9 @@
       "max_match_id": 90519052
     },
     "639157": {
-      "max_completion_time": 1795125922,
-      "max_match_id": 92220028,
-      "max_stat_lmd": 1795125922
+      "max_completion_time": 1795129172,
+      "max_match_id": 92222659,
+      "max_stat_lmd": 1795129172
     },
     "648514": {
       "max_completion_time": 1795056915,
@@ -160,9 +162,9 @@
       "max_match_id": 78881147
     },
     "79327": {
-      "max_completion_time": 1795125922,
-      "max_match_id": 92220028,
-      "max_stat_lmd": 1795125922
+      "max_completion_time": 1795129172,
+      "max_match_id": 92222659,
+      "max_stat_lmd": 1795129172
     },
     "81751": {
       "max_completion_time": 1794790999,
@@ -194,9 +196,9 @@
     }
   },
   "radar_coh3_pids": [
-    79327,
-    639157
+    13450,
+    31145
   ],
-  "radar_last_sync_ts": 1795126020,
+  "radar_last_sync_ts": 1795131494,
   "schema_version": 2
 }
