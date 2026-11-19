@@ -1,6 +1,6 @@
 {
-  "last_checked_ts": 1795122082,
-  "last_dispatch_ts": 1795122082,
+  "last_checked_ts": 1795123631,
+  "last_dispatch_ts": 1795123631,
   "last_weekly_summary_iso_week": "",
   "players": {
     "1005730": {
@@ -132,18 +132,18 @@
       "max_match_id": 90519052
     },
     "639157": {
-      "max_completion_time": 1795121963,
-      "max_match_id": 92216265,
-      "max_stat_lmd": 1795121963
+      "max_completion_time": 1795123393,
+      "max_match_id": 92218229,
+      "max_stat_lmd": 1795123393
     },
     "648514": {
       "max_completion_time": 1795056915,
       "max_match_id": 92124661
     },
     "6557": {
-      "max_completion_time": 1795121755,
-      "max_match_id": 92216845,
-      "max_stat_lmd": 1795121755
+      "max_completion_time": 1795122702,
+      "max_match_id": 92218125,
+      "max_stat_lmd": 1795122702
     },
     "691": {
       "max_completion_time": 1794173116,
@@ -158,9 +158,9 @@
       "max_match_id": 78881147
     },
     "79327": {
-      "max_completion_time": 1795121963,
-      "max_match_id": 92216265,
-      "max_stat_lmd": 1795121963
+      "max_completion_time": 1795123393,
+      "max_match_id": 92218229,
+      "max_stat_lmd": 1795123393
     },
     "81751": {
       "max_completion_time": 1794790999,
@@ -196,6 +196,6 @@
     79327,
     639157
   ],
-  "radar_last_sync_ts": 1795121980,
+  "radar_last_sync_ts": 1795123552,
   "schema_version": 2
 }
