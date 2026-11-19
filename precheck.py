@@ -21,6 +21,7 @@ import gzip
 import io
 import json
 import os
+import re
 import ssl
 import sys
 import tempfile
@@ -44,6 +45,10 @@ MAX_RADAR_BYTES = 256 * 1024  # 256 KB limite estrito para state.json do Radar d
 RADAR_MAX_AGE_SEC = 7200  # Ignora estado do Radar se estiver há >2h sem sincronizar
 BRT_TZ = timezone(timedelta(hours=-3))
 HEARTBEAT_INTERVAL_SEC = 3 * 3600  # Garante 1 disparo de segurança a cada 3h (limpeza 72h, Open Data, retries)
+
+URL_FORBIDDEN_CHARS_RE = re.compile(r"[\x00-\x20\x7f]")
+SAFE_GH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
+SAFE_GH_REF_RE = re.compile(r"^[A-Za-z0-9_./-]{1,128}$")
 
 # As 45 contas vinculadas (44 jogadores únicos) monitoradas no CoH3 Brasil Tracker
 MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
@@ -109,9 +114,30 @@ def _get_opener() -> urllib.request.OpenerDirector:
     if opener is None:
         ctx = ssl.create_default_context()
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.check_hostname = True
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        if hasattr(ssl, "OP_NO_COMPRESSION"):
+            ctx.options |= ssl.OP_NO_COMPRESSION
         opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx), _NoRedirectHandler())
         _TLS_LOCALS.opener = opener
     return opener
+
+
+def _validate_outbound_https(url: str, allowed_host: str, path_prefix: str = "/") -> urllib.parse.ParseResult:
+    """Valida esquema HTTPS, host exato, porta 443, ausência de credenciais/controles e prefixo de caminho."""
+    clean = (url or "").strip()
+    if not clean or URL_FORBIDDEN_CHARS_RE.search(clean):
+        raise ValueError("URL inválida ou com caracteres de controle proibidos.")
+    parsed = urllib.parse.urlparse(clean)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() != allowed_host.lower():
+        raise ValueError(f"Host fora da allowlist ({allowed_host}).")
+    if parsed.username or parsed.password:
+        raise ValueError("Credenciais embutidas na URL são bloqueadas.")
+    if parsed.port not in (None, 443):
+        raise ValueError("Porta fora do padrão HTTPS (443) bloqueada.")
+    if path_prefix and not (parsed.path or "").startswith(path_prefix):
+        raise ValueError("Caminho de URL fora do escopo autorizado.")
+    return parsed
 
 
 def _read_bounded_json(resp: Any, max_bytes: int = MAX_HTTP_BYTES) -> dict[str, Any]:
@@ -167,9 +193,9 @@ def fetch_veteranos_radar_active_pids(max_age_sec: int = RADAR_MAX_AGE_SEC) -> t
     Lê (estritamente somente-leitura) o `state.json` público do Radar dos Veteranos
     (`nigosky/coh3-br-lobby-radar`) e retorna `(active_pids, last_sync_ts, ok)`.
     """
-    parsed = urllib.parse.urlparse(RADAR_STATE_URL)
-    if parsed.scheme != "https" or parsed.hostname != RADAR_HOST or parsed.path != RADAR_STATE_PATH:
-        raise ValueError("URL do Radar fora da allowlist.")
+    parsed = _validate_outbound_https(RADAR_STATE_URL, RADAR_HOST, path_prefix=RADAR_STATE_PATH)
+    if parsed.path != RADAR_STATE_PATH:
+        raise ValueError("Caminho do Radar fora da allowlist.")
 
     headers = {
         "User-Agent": "CoH3-BR-SmartScheduler/2.1",
@@ -201,7 +227,7 @@ def fetch_veteranos_radar_active_pids(max_age_sec: int = RADAR_MAX_AGE_SEC) -> t
                             active_pids.update(_extract_pids_from_seq(vet_tuple[0]))
                         if len(vet_tuple) >= 3:
                             active_pids.update(_extract_pids_from_seq(vet_tuple[2]))
-                except (ValueError, SyntaxError, TypeError):
+                except (ValueError, SyntaxError, TypeError, RecursionError, MemoryError):
                     pass
 
             return active_pids & MONITORED_PID_SET, last_sync_ts, True
@@ -231,9 +257,7 @@ def fetch_personal_stat_last_match(pids: list[int]) -> dict[int, int]:
         target_set = set(chunk)
         encoded_ids = urllib.parse.quote("[" + ",".join(str(p) for p in chunk) + "]")
         url = f"{BASE_URL}/getPersonalStat?title=coh3&profile_ids={encoded_ids}"
-        parsed = urllib.parse.urlparse(url)
-        if parsed.scheme != "https" or parsed.hostname != RELIC_HOST:
-            raise ValueError("Host fora da allowlist da Relic.")
+        _validate_outbound_https(url, RELIC_HOST, path_prefix="/community/leaderboard/")
 
         try:
             req = urllib.request.Request(url, headers=headers, method="GET")
@@ -275,9 +299,7 @@ def fetch_latest_player_marker(profile_id: int) -> tuple[int, int, int, bool]:
         return pid, 0, 0, False
     qs = urllib.parse.urlencode({"title": "coh3", "profile_id": str(pid)})
     url = f"{BASE_URL}/getRecentMatchHistoryByProfileId?{qs}"
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname != RELIC_HOST:
-        raise ValueError("Host fora da allowlist da Relic.")
+    _validate_outbound_https(url, RELIC_HOST, path_prefix="/community/leaderboard/")
 
     headers = {
         "User-Agent": "CoH3-BR-SmartScheduler/2.1",
@@ -320,12 +342,18 @@ def dispatch_private_tracker(
     if not clean_token:
         return False, 0
 
-    url = f"https://{GITHUB_API_HOST}/repos/{owner}/{repo}/actions/workflows/{workflow}/dispatches"
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname != GITHUB_API_HOST:
-        raise ValueError("Host fora da allowlist da GitHub API.")
+    for label, seg in (("owner", owner), ("repo", repo), ("workflow", workflow)):
+        val = (seg or "").strip()
+        if not SAFE_GH_SEGMENT_RE.fullmatch(val) or ".." in val:
+            raise ValueError(f"Parâmetro GitHub inválido ({label}).")
+    clean_ref = (ref or "").strip()
+    if not SAFE_GH_REF_RE.fullmatch(clean_ref) or ".." in clean_ref:
+        raise ValueError("Parâmetro GitHub inválido (ref).")
 
-    body = json.dumps({"ref": ref}).encode("utf-8")
+    url = f"https://{GITHUB_API_HOST}/repos/{owner.strip()}/{repo.strip()}/actions/workflows/{workflow.strip()}/dispatches"
+    _validate_outbound_https(url, GITHUB_API_HOST, path_prefix="/repos/")
+
+    body = json.dumps({"ref": clean_ref}).encode("utf-8")
     headers = {
         "User-Agent": "CoH3-BR-SmartScheduler/2.1",
         "Accept": "application/vnd.github+json",
