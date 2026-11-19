@@ -1,7 +1,7 @@
 {
-  "last_checked_ts": 1795050782,
+  "last_checked_ts": 1795052573,
   "last_daily_rank_date_brt": "2026-11-18",
-  "last_dispatch_ts": 1795050782,
+  "last_dispatch_ts": 1795052573,
   "last_weekly_summary_iso_week": "",
   "players": {
     "1005730": {
@@ -9,8 +9,8 @@
       "max_match_id": 92115226
     },
     "1022333": {
-      "max_completion_time": 1795049392,
-      "max_match_id": 92118623
+      "max_completion_time": 1795051485,
+      "max_match_id": 92119561
     },
     "1088455": {
       "max_completion_time": 1795050719,
@@ -37,8 +37,8 @@
       "max_match_id": 92007098
     },
     "13450": {
-      "max_completion_time": 1795050743,
-      "max_match_id": 92118796
+      "max_completion_time": 1795051950,
+      "max_match_id": 92120636
     },
     "153969": {
       "max_completion_time": 1794162164,
@@ -117,25 +117,42 @@
       "max_match_id": 90821783
     },
     "735940": {
-      "max_completion_time": 1794086451,
-      "max_match_id": 90659635
+      "max_completion_time": 1795051323,
+      "max_match_id": 92119860
     },
     "79327": {
-      "max_completion_time": 1795039763,
-      "max_match_id": 92110482
+      "max_completion_time": 1795051323,
+      "max_match_id": 92119860
     },
     "900358": {
       "max_completion_time": 1794887044,
       "max_match_id": 91894299
     },
     "944488": {
-      "max_completion_time": 1795049392,
-      "max_match_id": 92118623
+      "max_completion_time": 1795051485,
+      "max_match_id": 92119561
     },
     "991764": {
       "max_completion_time": 1794870237,
       "max_match_id": 91881574
     }
   },
-  "schema_version": 1
+  "schema_version": 2,
+  "steam_in_coh3_sids": [
+    "76561197963172584",
+    "76561197981615184",
+    "76561197986271242",
+    "76561198135142137",
+    "76561198140782132"
+  ],
+  "steam_online_sids": [
+    "76561198034510845",
+    "76561198058548575",
+    "76561198070545853",
+    "76561198108568598",
+    "76561198205052385",
+    "76561198264285149",
+    "76561198284234077",
+    "76561198372757032"
+  ]
 }
