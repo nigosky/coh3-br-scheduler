@@ -2,16 +2,23 @@ name: CoH3 BR Scheduler (Smart Pre-Check Dispatcher)
 
 on:
   schedule:
-    # Horario ativo no Brasil (12:00-20:59 BRT = 15:00-23:59 UTC): a cada 5 min fora de pico (gratis no repo publico!)
-    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 15-23 * * *"
-    # Noite/virada no Brasil (21:00-01:59 BRT = 00:00-04:59 UTC): a cada 5 min fora de pico
-    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 0-4 * * *"
-    # Madrugada/manha (02:00-11:59 BRT = 05:00-14:59 UTC): a cada 30 min (:07, :37)
-    - cron: "7,37 5-14 * * *"
+    # Fallback de auto-recuperacao: caso a cadeia autonoma seja pausada manualmente, o cron religa sozinho
+    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
+  push:
+    branches:
+      - main
+    paths:
+      - "**.py"
+      - ".github/workflows/**"
   workflow_dispatch:
     inputs:
       force_dispatch:
-        description: "Forcar disparo imediato no repositorio privado mesmo sem novas partidas?"
+        description: "Forcar disparo imediato no 1o ciclo mesmo sem novas partidas?"
+        required: false
+        default: false
+        type: boolean
+      auto_relay:
+        description: "Manter cadeia autonoma de ciclos de 5 min ativa 24h/dia (1h por sessao)?"
         required: false
         default: true
         type: boolean
@@ -24,122 +31,134 @@ concurrency:
 
 jobs:
   dispatch-private-monitor:
+    if: github.repository == 'nigosky/coh3-br-scheduler' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 70
     permissions:
       contents: write
+      actions: write
     steps:
       - name: Checkout seguro na branch ativa (SHA imutavel)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.ref_name }}
+          ref: main
           fetch-depth: 0
 
-      - name: Pre-checagem inteligente na API publica da Relic (33 contas BR)
+      - name: Pre-checagem continua a cada 5 min na API da Relic (12 ciclos = 60 min)
         id: precheck
         env:
           PYTHONDONTWRITEBYTECODE: "1"
-          FORCE_DISPATCH: ${{ github.event_name == 'workflow_dispatch' && inputs.force_dispatch }}
-        run: |
-          set -euo pipefail
-          python3 precheck.py
-
-      - name: Disparar ciclo no repositorio privado somente quando necessario
-        if: steps.precheck.outputs.should_dispatch == 'true'
-        env:
           TRACKER_DISPATCH_TOKEN: ${{ secrets.TRACKER_DISPATCH_TOKEN }}
           TARGET_OWNER: "nigosky"
           TARGET_REPO: "coh3-br-tracker"
           TARGET_WORKFLOW: "coh3_monitor.yml"
           TARGET_REF: "main"
-          PRECHECK_REASON: ${{ steps.precheck.outputs.reason }}
+          FORCE_DISPATCH: ${{ (github.event_name == 'workflow_dispatch' && inputs.force_dispatch) || false }}
+          RELAY_ENABLED_VAR: ${{ vars.SCHEDULER_AUTO_RELAY_ENABLED }}
+          RELAY_CYCLES_VAR: ${{ vars.SCHEDULER_RELAY_CYCLES }}
+          AUTO_RELAY_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.auto_relay }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
-          if [ -z "${TRACKER_DISPATCH_TOKEN:-}" ]; then
-            echo "::error::O Secret TRACKER_DISPATCH_TOKEN ainda nao foi configurado neste repositorio (Settings -> Secrets and variables -> Actions)."
-            exit 1
+          # Validacao numerica estrita [1..24] (padrao 12 ciclos = 60 min a cada 5 min)
+          CYCLES=12
+          if [[ "${RELAY_CYCLES_VAR:-}" =~ ^[0-9]+$ ]] && [ "${RELAY_CYCLES_VAR}" -ge 1 ] && [ "${RELAY_CYCLES_VAR}" -le 24 ]; then
+            CYCLES="${RELAY_CYCLES_VAR}"
+          fi
+          if [ "${RELAY_ENABLED_VAR:-true}" = "false" ]; then
+            CYCLES=1
+          elif [ "${EVENT_NAME}" = "workflow_dispatch" ] && [ "${AUTO_RELAY_INPUT:-true}" = "false" ]; then
+            CYCLES=1
           fi
 
-          API_URL="https://api.github.com/repos/${TARGET_OWNER}/${TARGET_REPO}/actions/workflows/${TARGET_WORKFLOW}/dispatches"
-          BODY_FILE="$(mktemp)"
-          trap 'rm -f "${BODY_FILE}"' EXIT
+          python3 precheck.py --loop-cycles "${CYCLES}" --loop-interval-sec 300
 
-          DISPATCHED=false
-          LAST_HTTP="000"
+      - name: Auditoria anti-vazamento e persistencia de state.json
+        if: always()
+        run: |
+          set -euo pipefail
 
-          for attempt in 1 2 3; do
-            HTTP_CODE="$(
-              curl -sS \
-                --proto '=https' \
-                --tlsv1.2 \
-                --max-time 20 \
-                -o "${BODY_FILE}" \
-                -w "%{http_code}" \
-                -X POST \
-                -H "Accept: application/vnd.github+json" \
-                -H "Authorization: Bearer ${TRACKER_DISPATCH_TOKEN}" \
-                -H "X-GitHub-Api-Version: 2022-11-28" \
-                -H "Content-Type: application/json" \
-                "${API_URL}" \
-                -d "{\"ref\":\"${TARGET_REF}\"}" || echo "000"
-            )"
-            LAST_HTTP="${HTTP_CODE}"
-
-            if [ "${HTTP_CODE}" = "204" ]; then
-              DISPATCHED=true
-              break
-            fi
-
-            echo "::warning::Tentativa ${attempt}/3 retornou HTTP ${HTTP_CODE} ao disparar ${TARGET_OWNER}/${TARGET_REPO}."
-            sleep "$((attempt * 3))"
-          done
-
-          if [ "${DISPATCHED}" != "true" ]; then
-            echo "::error::Falha ao disparar workflow privado (HTTP ${LAST_HTTP}). Verifique se TRACKER_DISPATCH_TOKEN possui permissao 'Actions: Read and write' no repositorio ${TARGET_OWNER}/${TARGET_REPO}."
-            head -c 400 "${BODY_FILE}" || true
-            echo ""
+          # Bloqueia qualquer padrao de token GitHub/Discord em arquivos rastreados antes de commitar
+          if grep -RInE "(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|discord(app)?\.com/api/(v[0-9]+/)?webhooks/[0-9]+)" state.json *.py 2>/dev/null; then
+            echo "::error::Bloqueio de seguranca acionado: padrao de credencial detectado em arquivo rastreado!"
             exit 1
           fi
 
           if [ -f "state.json" ]; then
             git add -- state.json
-            if ! git diff --cached --quiet; then
-              BRANCH_NAME="${GITHUB_REF_NAME:-main}"
-              git config user.name "github-actions[bot]"
-              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-              git commit -m "chore(precheck): atualizar marcador de partidas [skip ci]"
-              for attempt in 1 2 3; do
-                git pull --rebase -X theirs origin "${BRANCH_NAME}" || true
-                if git push origin "HEAD:${BRANCH_NAME}"; then
-                  break
-                fi
-                sleep 2
-              done
-            fi
           fi
 
-          echo "Disparo enviado com sucesso para ${TARGET_OWNER}/${TARGET_REPO}@${TARGET_REF} (${PRECHECK_REASON})."
+          if git diff --cached --quiet; then
+            echo "Nenhuma alteracao em state.json nesta sessao."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore(precheck): atualizar marcador de partidas [skip ci]"
+            for attempt in 1 2 3; do
+              git pull --rebase -X theirs origin main || {
+                git rebase --abort 2>/dev/null || true
+              }
+              if git push origin "HEAD:main"; then
+                echo "state.json salvo com sucesso em main."
+                break
+              fi
+              sleep 2
+            done
+          fi
 
-      - name: Resumo da Pre-Checagem Inteligente
+      - name: Auto-agendar proxima sessao autonoma de 60 min (Self-Relay via GITHUB_TOKEN efemero)
+        if: always() && !cancelled()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELAY_ENABLED_VAR: ${{ vars.SCHEDULER_AUTO_RELAY_ENABLED }}
+          AUTO_RELAY_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.auto_relay }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          if [ "${RELAY_ENABLED_VAR:-true}" = "false" ]; then
+            echo "Kill-switch SCHEDULER_AUTO_RELAY_ENABLED=false ativo; cadeia autonoma encerrada com seguranca."
+            exit 0
+          fi
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ] && [ "${AUTO_RELAY_INPUT:-true}" = "false" ]; then
+            echo "Execucao unica solicitada (auto_relay=false); nao agendando proxima sessao."
+            exit 0
+          fi
+
+          # Dupla checagem anti-duplicidade: se ja houver outra sessao na fila/em andamento, nao empilha outra!
+          PENDING_COUNT="$(gh api 'repos/nigosky/coh3-br-scheduler/actions/workflows/scheduler.yml/runs?per_page=10' \
+            --jq '[.workflow_runs[] | select((.status == "queued" or .status == "in_progress" or .status == "waiting") and (.id != '"${GITHUB_RUN_ID}"'))] | length')"
+
+          if [ "${PENDING_COUNT:-0}" -gt 0 ]; then
+            echo "Ja existe ${PENDING_COUNT} sessao pendente/em andamento; evitando disparo duplicado."
+            exit 0
+          fi
+
+          gh workflow run scheduler.yml \
+            --repo nigosky/coh3-br-scheduler \
+            --ref main \
+            -f force_dispatch=false \
+            -f auto_relay=true
+          echo "Proxima sessao autonoma de 60 min agendada com sucesso via GITHUB_TOKEN efemero!"
+
+      - name: Resumo da Sessao do Smart Scheduler
         if: always()
         env:
-          SHOULD_DISPATCH: ${{ steps.precheck.outputs.should_dispatch }}
-          PRECHECK_REASON: ${{ steps.precheck.outputs.reason }}
+          TOTAL_CYCLES: ${{ steps.precheck.outputs.total_cycles }}
+          DISPATCHES_COUNT: ${{ steps.precheck.outputs.dispatches_count }}
+          SKIPS_COUNT: ${{ steps.precheck.outputs.skips_count }}
           OK_ACCOUNTS: ${{ steps.precheck.outputs.ok_accounts }}
+          SUMMARY_REASON: ${{ steps.precheck.outputs.summary_reason }}
         run: |
           UTC_NOW="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           BRT_NOW="$(TZ='America/Sao_Paulo' date '+%Y-%m-%d %H:%M:%S BRT')"
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
             {
-              echo "### CoH3 BR Smart Scheduler — Pré-Checagem Relic API"
-              echo "- **Horário (BRT):** ${BRT_NOW} (${UTC_NOW})"
+              echo "### CoH3 BR Smart Scheduler — Sessão Autônoma (5 em 5 min)"
+              echo "- **Encerramento (BRT):** ${BRT_NOW} (${UTC_NOW})"
               echo "- **Contas verificadas na Relic:** \`${OK_ACCOUNTS:-N/D}\`"
-              if [ "${SHOULD_DISPATCH:-false}" = "true" ]; then
-                echo "- **Decisão:** 🟢 **DISPARADO** (\`HTTP 204\` → \`nigosky/coh3-br-tracker\`)"
-              else
-                echo "- **Decisão:** 💤 **ECONOMIZADO (SKIP)** — zero minutos gastos no repositório privado"
-              fi
-              echo "- **Motivo:** ${PRECHECK_REASON:-N/D}"
+              echo "- **Ciclos executados:** \`${TOTAL_CYCLES:-0}\` (🟢 Disparos: \`${DISPATCHES_COUNT:-0}\` | 💤 Economizados: \`${SKIPS_COUNT:-0}\`)"
+              echo "- **Resumo:** ${SUMMARY_REASON:-N/D}"
             } >> "${GITHUB_STEP_SUMMARY}"
           fi
