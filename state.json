@@ -1,7 +1,7 @@
 {
-  "last_checked_ts": 1795052573,
-  "last_daily_rank_date_brt": "2026-11-18",
-  "last_dispatch_ts": 1795052573,
+  "last_checked_ts": 1795077938,
+  "last_daily_rank_date_brt": "2026-11-19",
+  "last_dispatch_ts": 1795077938,
   "last_weekly_summary_iso_week": "",
   "players": {
     "1005730": {
@@ -13,8 +13,8 @@
       "max_match_id": 92119561
     },
     "1088455": {
-      "max_completion_time": 1795050719,
-      "max_match_id": 92118952
+      "max_completion_time": 1795056915,
+      "max_match_id": 92124661
     },
     "110078": {
       "max_completion_time": 1794879618,
@@ -97,20 +97,20 @@
       "max_match_id": 92115226
     },
     "5768": {
-      "max_completion_time": 1794970847,
-      "max_match_id": 92009714
+      "max_completion_time": 1795061153,
+      "max_match_id": 92129400
     },
     "639157": {
       "max_completion_time": 1795039763,
       "max_match_id": 92110482
     },
     "648514": {
-      "max_completion_time": 1795050719,
-      "max_match_id": 92118952
+      "max_completion_time": 1795056915,
+      "max_match_id": 92124661
     },
     "6557": {
-      "max_completion_time": 1794965018,
-      "max_match_id": 92003971
+      "max_completion_time": 1795059167,
+      "max_match_id": 92127299
     },
     "691": {
       "max_completion_time": 1794173116,
@@ -125,8 +125,8 @@
       "max_match_id": 92119860
     },
     "900358": {
-      "max_completion_time": 1794887044,
-      "max_match_id": 91894299
+      "max_completion_time": 1795059167,
+      "max_match_id": 92127299
     },
     "944488": {
       "max_completion_time": 1795051485,
@@ -137,22 +137,5 @@
       "max_match_id": 91881574
     }
   },
-  "schema_version": 2,
-  "steam_in_coh3_sids": [
-    "76561197963172584",
-    "76561197981615184",
-    "76561197986271242",
-    "76561198135142137",
-    "76561198140782132"
-  ],
-  "steam_online_sids": [
-    "76561198034510845",
-    "76561198058548575",
-    "76561198070545853",
-    "76561198108568598",
-    "76561198205052385",
-    "76561198264285149",
-    "76561198284234077",
-    "76561198372757032"
-  ]
+  "schema_version": 1
 }
