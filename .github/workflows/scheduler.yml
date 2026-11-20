@@ -44,6 +44,13 @@ jobs:
           ref: main
           fetch-depth: 0
 
+      - name: Validar testes da base compartilhada e pre-checagem
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s . -p "test_*.py" -v
+
       - name: Pre-checagem continua a cada 5 min na API da Relic (12 ciclos = 60 min)
         id: precheck
         env:
