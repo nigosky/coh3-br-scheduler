@@ -39,9 +39,11 @@ GITHUB_API_HOST = "api.github.com"
 RADAR_HOST = "raw.githubusercontent.com"
 RADAR_STATE_PATH = "/nigosky/coh3-br-lobby-radar/main/state.json"
 RADAR_STATE_URL = f"https://{RADAR_HOST}{RADAR_STATE_PATH}"
+SHARED_ROSTER_PATH = "/nigosky/coh3-br-lobby-radar/main/players_roster.json"
+SHARED_ROSTER_URL = f"https://{RADAR_HOST}{SHARED_ROSTER_PATH}"
 BASE_URL = f"https://{RELIC_HOST}/community/leaderboard"
 MAX_HTTP_BYTES = 5 * 1024 * 1024  # 5 MB limite estrito anti-Gzip-bomb
-MAX_RADAR_BYTES = 256 * 1024  # 256 KB limite estrito para state.json do Radar dos Veteranos
+MAX_RADAR_BYTES = 256 * 1024  # 256 KB limite estrito para state.json e players_roster.json
 RADAR_MAX_AGE_SEC = 7200  # Ignora estado do Radar se estiver há >2h sem sincronizar
 BRT_TZ = timezone(timedelta(hours=-3))
 HEARTBEAT_INTERVAL_SEC = 3 * 3600  # Garante 1 disparo de segurança a cada 3h (limpeza 72h, Open Data, retries)
@@ -54,8 +56,8 @@ URL_FORBIDDEN_CHARS_RE = re.compile(r"[\x00-\x20\x7f]")
 SAFE_GH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 SAFE_GH_REF_RE = re.compile(r"^[A-Za-z0-9_./-]{1,128}$")
 
-# As 45 contas vinculadas (44 jogadores únicos) monitoradas no CoH3 Brasil Tracker
-MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
+# Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível
+FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (79327, "Chacineiro"),
     (991764, "SaNgar [BR]"),
     (1088455, "luiz_fmh"),
@@ -103,6 +105,7 @@ MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (975688, "Kefbr"),
 )
 
+MONITORED_PROFILES: tuple[tuple[int, str], ...] = FALLBACK_MONITORED_PROFILES
 MONITORED_PID_SET: frozenset[int] = frozenset(pid for pid, _ in MONITORED_PROFILES)
 
 _TLS_LOCALS = threading.local()
@@ -239,6 +242,74 @@ def fetch_veteranos_radar_active_pids(max_age_sec: int = RADAR_MAX_AGE_SEC) -> t
             if attempt == 0:
                 time.sleep(0.6)
     return set(), 0, False
+
+
+def parse_shared_roster_profiles(data: dict[str, Any]) -> tuple[tuple[int, str], ...]:
+    """Extrai `(profile_id, alias)` de todos os Veteranos da base compartilhada `players_roster.json`."""
+    if not isinstance(data, dict) or int(data.get("schema_version", 0) or 0) < 1:
+        raise ValueError("Formato inválido de players_roster.json.")
+    raw_vets = data.get("veteranos")
+    if not isinstance(raw_vets, list) or not raw_vets:
+        raise ValueError("Lista 'veteranos' ausente ou vazia em players_roster.json.")
+
+    profiles: list[tuple[int, str]] = []
+    seen_pids: set[int] = set()
+    for row in raw_vets:
+        if not isinstance(row, dict):
+            continue
+        try:
+            pid = int(row.get("profile_id", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0 or pid in seen_pids:
+            continue
+        seen_pids.add(pid)
+        alias = str(row.get("original_alias") or row.get("alias") or f"Player {pid}").strip()[:40]
+        if int(row.get("merged_into_profile_id", 0) or 0) > 0 and "(sec)" not in alias:
+            alias = f"{alias} (sec)"
+        profiles.append((pid, alias))
+
+    if not profiles:
+        raise ValueError("Nenhum profile_id válido encontrado em players_roster.json.")
+    return tuple(profiles)
+
+
+def fetch_shared_monitored_profiles(url: str = SHARED_ROSTER_URL) -> tuple[tuple[int, str], ...] | None:
+    """
+    Lê a base compartilhada `players_roster.json` (`nigosky/coh3-br-lobby-radar`) via HTTPS validado.
+    Retorna `None` em caso de falha transitória (mantendo fallback seguro).
+    """
+    parsed = _validate_outbound_https(url, RADAR_HOST, path_prefix=SHARED_ROSTER_PATH)
+    if parsed.path != SHARED_ROSTER_PATH:
+        raise ValueError("Caminho do roster compartilhado fora da allowlist.")
+
+    headers = {
+        "User-Agent": "CoH3-BR-SmartScheduler/2.2",
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip",
+        "Cache-Control": "no-cache",
+    }
+    for attempt in range(2):
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with _get_opener().open(req, timeout=8) as resp:
+                data = _read_bounded_json(resp, max_bytes=MAX_RADAR_BYTES)
+            return parse_shared_roster_profiles(data)
+        except Exception:
+            if attempt == 0:
+                time.sleep(0.6)
+    return None
+
+
+def refresh_monitored_profiles(url: str = SHARED_ROSTER_URL) -> bool:
+    """Atualiza `MONITORED_PROFILES` e `MONITORED_PID_SET` a partir da base única compartilhada."""
+    global MONITORED_PROFILES, MONITORED_PID_SET
+    fetched = fetch_shared_monitored_profiles(url=url)
+    if fetched is None:
+        return False
+    MONITORED_PROFILES = fetched
+    MONITORED_PID_SET = frozenset(pid for pid, _ in fetched)
+    return True
 
 
 def fetch_personal_stat_last_match(pids: list[int]) -> dict[int, int]:
@@ -485,7 +556,11 @@ def evaluate_precheck(
     new_activity_players: list[str] = []
     new_activity_pids: set[int] = set()
     fresh_automatch_mid = 0
-    updated_players: dict[str, dict[str, int]] = {k: dict(v) for k, v in prev_players.items()}
+    updated_players: dict[str, dict[str, int]] = {
+        k: dict(v)
+        for k, v in prev_players.items()
+        if str(k).isdigit() and int(k) in MONITORED_PID_SET
+    }
 
     for pid, _ in MONITORED_PROFILES:
         _, max_mid, max_ct, ok, max_auto_mid, max_auto_ct = results_by_pid[pid]
@@ -669,6 +744,14 @@ def main() -> int:
 
     for idx in range(1, cycles + 1):
         cycle_start = time.monotonic()
+        if idx == 1 or (idx - 1) % 3 == 0:
+            synced = refresh_monitored_profiles()
+            if idx == 1:
+                src_lbl = "players_roster.json (compartilhado)" if synced else "fallback embutido"
+                print(
+                    f"[ROSTER] Base sincronizada ({src_lbl}): {len(MONITORED_PROFILES)} contas monitoradas.",
+                    flush=True,
+                )
         now_brt_str = datetime.now(tz=BRT_TZ).strftime("%H:%M:%S BRT")
         should_dispatch, dispatched_ok, reason, meta = evaluate_precheck(
             state_path=state_path,
