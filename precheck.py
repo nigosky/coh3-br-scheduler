@@ -61,6 +61,7 @@ STEAM_ID64_VALID_RE = re.compile(r"^7656119\d{10}$")
 # Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível
 FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (79327, "Chacineiro"),
+    (1333418, "Chacineiro (sec)"),
     (991764, "SaNgar [BR]"),
     (1088455, "luiz_fmh"),
     (735940, "Jimmy Duelista"),
@@ -111,6 +112,7 @@ FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
 # Mapa fallback SteamID64 -> profile_id (permite consumir `last_steam_fast_sig[0]` do Radar sem usar chave Steam)
 FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561197963172584": 79327,    # Chacineiro
+    "76561198698969876": 1333418,  # Chacineiro (sec)
     "76561198115923932": 991764,   # SaNgar [BR]
     "76561198108568598": 1088455,  # luiz_fmh
     "76561198034510845": 735940,   # Jimmy Duelista
@@ -157,6 +159,11 @@ FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561199498421192": 1097608,  # Winter Animal
     "76561197994245218": 975688,   # Kefbr
 }
+
+# Contas secundárias mescladas preservadas quando a conta principal está no players_roster.json remoto
+LOCAL_MERGED_ACCOUNT_FALLBACKS: tuple[tuple[int, str, str, int], ...] = (
+    (1333418, "76561198698969876", "Chacineiro (sec)", 79327),
+)
 
 MONITORED_PROFILES: tuple[tuple[int, str], ...] = FALLBACK_MONITORED_PROFILES
 MONITORED_PID_SET: frozenset[int] = frozenset(pid for pid, _ in MONITORED_PROFILES)
@@ -453,15 +460,26 @@ def refresh_monitored_profiles(url: str = SHARED_ROSTER_URL) -> bool:
     fetched = fetch_shared_monitored_profiles(url=url)
     if fetched is None:
         return False
-    new_pid_set = frozenset(pid for pid, _ in fetched)
-    MONITORED_PROFILES = fetched
-    MONITORED_PID_SET = new_pid_set
-    if _LAST_FETCHED_STEAM_ID_TO_PID:
-        STEAM_ID_TO_PID = {
-            sid: pid for sid, pid in _LAST_FETCHED_STEAM_ID_TO_PID.items() if pid in new_pid_set
-        }
-    else:
-        STEAM_ID_TO_PID = {sid: pid for sid, pid in STEAM_ID_TO_PID.items() if pid in new_pid_set}
+    merged_list = list(fetched)
+    present_pids = {pid for pid, _ in merged_list}
+    sid_map: dict[str, int] = (
+        {sid: pid for sid, pid in _LAST_FETCHED_STEAM_ID_TO_PID.items() if pid in present_pids}
+        if _LAST_FETCHED_STEAM_ID_TO_PID
+        else {sid: pid for sid, pid in STEAM_ID_TO_PID.items() if pid in present_pids}
+    )
+    for ext_pid, ext_sid, ext_alias, main_pid in LOCAL_MERGED_ACCOUNT_FALLBACKS:
+        if ext_pid not in present_pids and main_pid in present_pids:
+            insert_idx = len(merged_list)
+            for idx, (pid, _) in enumerate(merged_list):
+                if pid == main_pid:
+                    insert_idx = idx + 1
+                    break
+            merged_list.insert(insert_idx, (ext_pid, ext_alias))
+            present_pids.add(ext_pid)
+            sid_map[ext_sid] = ext_pid
+    MONITORED_PROFILES = tuple(merged_list)
+    MONITORED_PID_SET = frozenset(present_pids)
+    STEAM_ID_TO_PID = sid_map
     return True
 
 
