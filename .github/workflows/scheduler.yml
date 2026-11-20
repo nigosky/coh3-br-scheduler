@@ -86,9 +86,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Bloqueia qualquer padrao de token GitHub/Discord/Steam/chave privada em TODOS os arquivos rastreados
-          SECRET_PATTERN="(ptb\.|canary\.)?discord(app)?\.com/api/(v[0-9]+/)?webhooks/[0-9]+|STEAM_WEB_API_KEY=[A-Za-z0-9]{16,}|[?&]key=[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
-          if git ls-files -z | xargs -0 grep -InE "${SECRET_PATTERN}" 2>/dev/null; then
+          # Bloqueia qualquer padrao de token GitHub/Discord/Steam/dispatch/chave privada em TODOS os arquivos rastreados
+          SECRET_PATTERN="(ptb\.|canary\.)?discord(app)?\.com/api/(v[0-9]+/)?webhooks/[0-9]+|STEAM_WEB_API_KEY=[A-Za-z0-9]{16,}|x-webapi-key[:=][[:space:]]*[A-Za-z0-9]{16,}|[?&]key=[A-Za-z0-9]{16,}|TRACKER_DISPATCH_TOKEN=[A-Za-z0-9_.-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+          if git ls-files -z | xargs -0 grep -InEi "${SECRET_PATTERN}" 2>/dev/null; then
             echo "::error::Bloqueio de seguranca acionado: padrao de credencial detectado em arquivo rastreado!"
             exit 1
           fi

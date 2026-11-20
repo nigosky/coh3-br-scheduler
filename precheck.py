@@ -3,7 +3,7 @@
 Pré-checagem inteligente (stdlib-only, TLS 1.2+) com loop contínuo de 5 min para `nigosky/coh3-br-scheduler`.
 
 Consulta diretamente a API pública da Relic (`getRecentMatchHistoryByProfileId`) das contas Steam
-monitoradas (sincronizadas da base compartilhada `players_roster.json`, com fallback embutido de 46 contas,
+monitoradas (sincronizadas da base compartilhada `players_roster.json`, com fallback embutido de 47 contas,
 cobrindo tanto Automatch ranqueadas quanto partidas Customizadas!) a cada 5 minutos durante uma sessão
 autônoma de 60 minutos (12 ciclos) e dispara (`workflow_dispatch`) o repositório privado
 `nigosky/coh3-br-tracker` imediatamente assim que qualquer partida nova termina!
@@ -35,6 +35,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+USER_AGENT = "CoH3-BR-SmartScheduler/2.4"
 RELIC_HOST = "coh3-api.reliclink.com"
 GITHUB_API_HOST = "api.github.com"
 RADAR_HOST = "raw.githubusercontent.com"
@@ -54,6 +55,7 @@ BG_FOLLOWUP_DELAY_SEC = 240  # Agenda 1 disparo único de confirmação no próx
 BG_FOLLOWUP_TTL_SEC = 2700  # Descarta agendamento se ficar obsoleto (>45 min)
 
 URL_FORBIDDEN_CHARS_RE = re.compile(r"[\x00-\x20\x7f]")
+URL_PATH_TRAVERSAL_RE = re.compile(r"(?:^|/)\.\.(?:/|$)|%2e%2e|%5c|\\", re.IGNORECASE)
 SAFE_GH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 SAFE_GH_REF_RE = re.compile(r"^[A-Za-z0-9_./-]{1,128}$")
 STEAM_ID64_VALID_RE = re.compile(r"^7656119\d{10}$")
@@ -82,7 +84,7 @@ FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (639157, "Itaperuna"),
     (110078, "Bineto"),
     (1143262, "Mazzaroppee"),
-    (55693, "BinhoBiceps"),
+    (55693, "Alface aka BinhoBiceps"),
     (337051, "Maiti"),
     (1022333, "gaules"),
     (32922, "Showtaro"),
@@ -133,7 +135,7 @@ FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561197979883434": 639157,   # Itaperuna
     "76561198024839791": 110078,   # Bineto
     "76561198105073246": 1143262,  # Mazzaroppee
-    "76561197996817129": 55693,    # BinhoBiceps
+    "76561197996817129": 55693,    # Alface aka BinhoBiceps
     "76561197981615184": 337051,   # Maiti
     "76561198264285149": 1022333,  # gaules
     "76561197986271242": 32922,    # Showtaro
@@ -219,7 +221,7 @@ def _validate_outbound_https(
     path_prefix: str = "/",
     allow_query: bool = True,
 ) -> urllib.parse.ParseResult:
-    """Valida esquema HTTPS, host exato, porta 443, ausência de credenciais/controles e prefixo de caminho."""
+    """Valida esquema HTTPS, host exato, porta 443, ausência de credenciais/fragmentos/traversal e prefixo de caminho."""
     clean = (url or "").strip()
     if not clean or URL_FORBIDDEN_CHARS_RE.search(clean):
         raise ValueError("URL inválida ou com caracteres de controle proibidos.")
@@ -228,12 +230,21 @@ def _validate_outbound_https(
         raise ValueError(f"Host fora da allowlist ({allowed_host}).")
     if parsed.username or parsed.password:
         raise ValueError("Credenciais embutidas na URL são bloqueadas.")
-    if parsed.port not in (None, 443):
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Porta inválida na URL.") from exc
+    if port not in (None, 443):
         raise ValueError("Porta fora do padrão HTTPS (443) bloqueada.")
-    if path_prefix and not (parsed.path or "").startswith(path_prefix):
+    if parsed.params or parsed.fragment or "#" in clean:
+        raise ValueError("Parâmetros de caminho ou fragmentos de URL são bloqueados.")
+    path_val = parsed.path or ""
+    if URL_PATH_TRAVERSAL_RE.search(path_val):
+        raise ValueError("Tentativa de path traversal na URL bloqueada.")
+    if path_prefix and not path_val.startswith(path_prefix):
         raise ValueError("Caminho de URL fora do escopo autorizado.")
-    if not allow_query and (parsed.query or parsed.fragment or "?" in clean or "#" in clean):
-        raise ValueError("Query string ou fragmento não permitido nesta URL.")
+    if not allow_query and (parsed.query or "?" in clean):
+        raise ValueError("Query string não permitida nesta URL.")
     return parsed
 
 
@@ -360,7 +371,7 @@ def fetch_veteranos_radar_active_pids(max_age_sec: int = RADAR_MAX_AGE_SEC) -> t
         raise ValueError("Caminho do Radar fora da allowlist.")
 
     headers = {
-        "User-Agent": "CoH3-BR-SmartScheduler/2.3",
+        "User-Agent": USER_AGENT,
         "Accept": "application/json",
         "Accept-Encoding": "gzip",
         "Cache-Control": "no-cache",
@@ -434,7 +445,7 @@ def fetch_shared_monitored_profiles(url: str = SHARED_ROSTER_URL) -> tuple[tuple
         raise ValueError("Caminho do roster compartilhado fora da allowlist.")
 
     headers = {
-        "User-Agent": "CoH3-BR-SmartScheduler/2.3",
+        "User-Agent": USER_AGENT,
         "Accept": "application/json",
         "Accept-Encoding": "gzip",
         "Cache-Control": "no-cache",
@@ -493,7 +504,7 @@ def fetch_personal_stat_last_match(pids: list[int]) -> dict[int, int]:
         return {}
 
     headers = {
-        "User-Agent": "CoH3-BR-SmartScheduler/2.1",
+        "User-Agent": USER_AGENT,
         "Accept": "application/json",
         "Accept-Encoding": "gzip",
     }
@@ -548,7 +559,7 @@ def fetch_latest_player_marker(profile_id: int) -> tuple[int, int, int, bool, in
     _validate_outbound_https(url, RELIC_HOST, path_prefix="/community/leaderboard/")
 
     headers = {
-        "User-Agent": "CoH3-BR-SmartScheduler/2.2",
+        "User-Agent": USER_AGENT,
         "Accept": "application/json",
         "Accept-Encoding": "gzip",
     }
@@ -609,7 +620,7 @@ def dispatch_private_tracker(
 
     body = json.dumps({"ref": clean_ref}).encode("utf-8")
     headers = {
-        "User-Agent": "CoH3-BR-SmartScheduler/2.3",
+        "User-Agent": USER_AGENT,
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {clean_token}",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -638,8 +649,11 @@ def dispatch_private_tracker(
 def load_state(state_path: Path) -> dict[str, Any]:
     if not state_path.is_file() or state_path.is_symlink():
         return {}
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        parsed = json.loads(state_path.read_text(encoding="utf-8"))
+        fd = os.open(state_path, flags)
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            parsed = json.loads(fh.read())
         return parsed if isinstance(parsed, dict) else {}
     except Exception:
         return {}
@@ -653,6 +667,8 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(payload)
+        if path.is_symlink():
+            raise RuntimeError(f"Escrita bloqueada em symlink não confiável: {path}")
         os.replace(tmp_name, path)
     finally:
         if os.path.exists(tmp_name):
@@ -663,10 +679,16 @@ def write_github_outputs(outputs: dict[str, str]) -> None:
     gh_out = os.environ.get("GITHUB_OUTPUT", "").strip()
     if not gh_out:
         return
-    with open(gh_out, "a", encoding="utf-8") as fh:
+    out_path = Path(gh_out)
+    if out_path.is_symlink():
+        raise RuntimeError("GITHUB_OUTPUT não pode ser symlink.")
+    with open(out_path, "a", encoding="utf-8") as fh:
         for k, v in outputs.items():
+            clean_k = str(k).strip()
+            if not clean_k or not re.fullmatch(r"[A-Za-z0-9_]+", clean_k):
+                continue
             clean_v = str(v).replace("\r", " ").replace("\n", " ").strip()
-            fh.write(f"{k}={clean_v}\n")
+            fh.write(f"{clean_k}={clean_v}\n")
 
 
 def evaluate_precheck(
