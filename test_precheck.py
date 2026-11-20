@@ -153,6 +153,39 @@ class TestSchedulerSharedRoster(unittest.TestCase):
                 precheck.atomic_write_json(link_path, {"hacked": True})
             self.assertEqual(real_file.read_text(encoding="utf-8"), '{"ok": true}\n')
 
+    def test_validate_outbound_https_and_gzip_bomb_protection(self) -> None:
+        import gzip
+        import io
+
+        for bad in (
+            "https://coh3-api.reliclink.com:abc/community/leaderboard/getPersonalStat",
+            "https://coh3-api.reliclink.com/community/leaderboard/../admin",
+            "https://coh3-api.reliclink.com/community/leaderboard/%2e%2e/admin",
+            "https://coh3-api.reliclink.com/community/leaderboard/x#frag",
+            "https://coh3-api.reliclink.com/community/leaderboard/x;param=1",
+        ):
+            with self.assertRaises(ValueError, msg=f"URL insegura não bloqueada: {bad!r}"):
+                precheck._validate_outbound_https(bad, precheck.RELIC_HOST, path_prefix="/community/leaderboard/")
+
+        class _FakeResp:
+            def __init__(self, data: bytes, hdrs: dict[str, str]) -> None:
+                self._buf = io.BytesIO(data)
+                self.headers = hdrs
+
+            def read(self, n: int = -1) -> bytes:
+                return self._buf.read(n)
+
+        bomb = gzip.compress(b'{"a":"' + (b"X" * 300_000) + b'"}')
+        with self.assertRaises(ValueError):
+            precheck._read_bounded_json(_FakeResp(bomb, {"Content-Encoding": "gzip"}), max_bytes=32_768)
+
+        ok_payload = b'{"ok": true}'
+        parsed = precheck._read_bounded_json(
+            _FakeResp(gzip.compress(ok_payload), {"Content-Encoding": "gzip"}),
+            max_bytes=4096,
+        )
+        self.assertEqual(parsed, {"ok": True})
+
 
 if __name__ == "__main__":
     unittest.main()
