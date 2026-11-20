@@ -1,9 +1,9 @@
 {
-  "last_checked_ts": 1795142318,
-  "last_dispatch_ts": 1795142318,
+  "last_checked_ts": 1795145638,
+  "last_dispatch_ts": 1795145638,
   "last_weekly_summary_iso_week": "",
-  "pending_bg_followup_due_ts": 1795142558,
-  "pending_bg_followup_match_id": 92234377,
+  "pending_bg_followup_due_ts": 1795145878,
+  "pending_bg_followup_match_id": 92236651,
   "players": {
     "1005730": {
       "max_completion_time": 1795119563,
@@ -16,9 +16,9 @@
       "max_stat_lmd": 1795126263
     },
     "1088455": {
-      "max_completion_time": 1795142288,
-      "max_match_id": 92234377,
-      "max_stat_lmd": 1795142288
+      "max_completion_time": 1795145101,
+      "max_match_id": 92236265,
+      "max_stat_lmd": 1795145102
     },
     "1097608": {
       "max_completion_time": 1794185896,
@@ -55,8 +55,9 @@
       "max_match_id": 90802544
     },
     "19747": {
-      "max_completion_time": 1794797843,
-      "max_match_id": 91769668
+      "max_completion_time": 1795143880,
+      "max_match_id": 92236347,
+      "max_stat_lmd": 1795143880
     },
     "21206": {
       "max_completion_time": 1793631282,
@@ -148,9 +149,9 @@
       "max_match_id": 92124661
     },
     "6557": {
-      "max_completion_time": 1795140668,
-      "max_match_id": 92232242,
-      "max_stat_lmd": 1795140668
+      "max_completion_time": 1795143880,
+      "max_match_id": 92236347,
+      "max_stat_lmd": 1795143880
     },
     "691": {
       "max_completion_time": 1794173116,
@@ -170,17 +171,18 @@
       "max_stat_lmd": 1795129172
     },
     "81751": {
-      "max_completion_time": 1794790999,
-      "max_match_id": 91764467
+      "max_completion_time": 1795145454,
+      "max_match_id": 92236651,
+      "max_stat_lmd": 1795145454
     },
     "84821": {
       "max_completion_time": 1783991339,
       "max_match_id": 79109597
     },
     "900358": {
-      "max_completion_time": 1795140668,
-      "max_match_id": 92232242,
-      "max_stat_lmd": 1795140668
+      "max_completion_time": 1795143880,
+      "max_match_id": 92236347,
+      "max_stat_lmd": 1795143880
     },
     "944488": {
       "max_completion_time": 1795051485,
@@ -201,9 +203,10 @@
   },
   "radar_coh3_pids": [
     6557,
-    900358,
-    1088455
+    19747,
+    81751,
+    900358
   ],
-  "radar_last_sync_ts": 1795141987,
+  "radar_last_sync_ts": 1795145092,
   "schema_version": 2
 }
