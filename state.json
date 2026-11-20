@@ -1,6 +1,6 @@
 {
-  "last_checked_ts": 1795205339,
-  "last_dispatch_ts": 1795205339,
+  "last_checked_ts": 1795208359,
+  "last_dispatch_ts": 1795208359,
   "last_weekly_summary_iso_week": "",
   "pending_bg_followup_due_ts": 0,
   "pending_bg_followup_match_id": 0,
@@ -16,18 +16,18 @@
       "max_stat_lmd": 1795126263
     },
     "1088455": {
-      "max_completion_time": 1795204977,
-      "max_match_id": 92328048,
-      "max_stat_lmd": 1795204977
+      "max_completion_time": 1795207260,
+      "max_match_id": 92330243,
+      "max_stat_lmd": 1795207260
     },
     "1097608": {
       "max_completion_time": 1794185896,
       "max_match_id": 90835186
     },
     "110078": {
-      "max_completion_time": 1795203551,
-      "max_match_id": 92326537,
-      "max_stat_lmd": 1795203552
+      "max_completion_time": 1795206473,
+      "max_match_id": 92329905,
+      "max_stat_lmd": 1795206473
     },
     "1114404": {
       "max_completion_time": 1795047766,
@@ -52,9 +52,9 @@
       "max_match_id": 92172691
     },
     "13450": {
-      "max_completion_time": 1795185926,
-      "max_match_id": 92290816,
-      "max_stat_lmd": 1795185927
+      "max_completion_time": 1795206381,
+      "max_match_id": 92329749,
+      "max_stat_lmd": 1795206381
     },
     "1423426": {
       "max_completion_time": 1794080435,
@@ -91,9 +91,9 @@
       "max_match_id": 47037784
     },
     "31145": {
-      "max_completion_time": 1795181844,
-      "max_match_id": 92285732,
-      "max_stat_lmd": 1795181844
+      "max_completion_time": 1795207831,
+      "max_match_id": 92330896,
+      "max_stat_lmd": 1795207831
     },
     "32922": {
       "max_completion_time": 1794703560,
@@ -207,9 +207,9 @@
       "max_match_id": 72075717
     },
     "991764": {
-      "max_completion_time": 1795202998,
-      "max_match_id": 92325689,
-      "max_stat_lmd": 1795202998
+      "max_completion_time": 1795205561,
+      "max_match_id": 92327400,
+      "max_stat_lmd": 1795205561
     },
     "99722": {
       "max_completion_time": 1779742217,
@@ -217,12 +217,11 @@
     }
   },
   "radar_coh3_pids": [
+    13450,
     31145,
-    81751,
     110078,
-    735940,
-    991764
+    1088455
   ],
-  "radar_last_sync_ts": 1795204886,
+  "radar_last_sync_ts": 1795207924,
   "schema_version": 2
 }
