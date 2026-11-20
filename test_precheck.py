@@ -20,14 +20,15 @@ class TestSchedulerSharedRoster(unittest.TestCase):
         precheck._LAST_FETCHED_STEAM_ID_TO_PID = {}
 
     def test_fallback_profiles_and_steam_map_stay_aligned(self) -> None:
-        self.assertEqual(len(precheck.FALLBACK_MONITORED_PROFILES), 46)
-        self.assertEqual(len(precheck.FALLBACK_STEAM_ID_TO_PID), 46)
+        self.assertEqual(len(precheck.FALLBACK_MONITORED_PROFILES), 47)
+        self.assertEqual(len(precheck.FALLBACK_STEAM_ID_TO_PID), 47)
         self.assertEqual(
             set(precheck.FALLBACK_STEAM_ID_TO_PID.values()),
             {pid for pid, _ in precheck.FALLBACK_MONITORED_PROFILES},
         )
-        # Conta secundária do arc (#1423426) presente no fallback e no mapa SteamID64
+        # Conta secundária do arc (#1423426) e smurf do Chacineiro (#1333418) presentes no fallback e mapa SteamID64
         self.assertEqual(precheck.FALLBACK_STEAM_ID_TO_PID.get("76561199482388323"), 1423426)
+        self.assertEqual(precheck.FALLBACK_STEAM_ID_TO_PID.get("76561198698969876"), 1333418)
 
     def test_parse_shared_roster_profiles_reads_veteranos_only_and_tags_secondary(self) -> None:
         payload = {
@@ -81,10 +82,19 @@ class TestSchedulerSharedRoster(unittest.TestCase):
             self.assertEqual(precheck.MONITORED_PROFILES, ((101, "Alpha"), (202, "Beta")))
             self.assertEqual(precheck.MONITORED_PID_SET, frozenset({101, 202}))
 
+        # Quando Chacineiro principal (#79327) está no roster remoto sem a smurf #1333418, preserva a smurf automaticamente
+        with patch.object(precheck, "fetch_shared_monitored_profiles", return_value=((79327, "Chacineiro"), (202, "Beta"))):
+            self.assertTrue(precheck.refresh_monitored_profiles())
+            self.assertEqual(
+                precheck.MONITORED_PROFILES,
+                ((79327, "Chacineiro"), (1333418, "Chacineiro (sec)"), (202, "Beta")),
+            )
+            self.assertEqual(precheck.STEAM_ID_TO_PID.get("76561198698969876"), 1333418)
+
         with patch.object(precheck, "fetch_shared_monitored_profiles", return_value=None):
             self.assertFalse(precheck.refresh_monitored_profiles())
             # Mantém o estado anterior válido sem zerar
-            self.assertEqual(precheck.MONITORED_PID_SET, frozenset({101, 202}))
+            self.assertEqual(precheck.MONITORED_PID_SET, frozenset({79327, 1333418, 202}))
 
     def test_parse_radar_state_reads_last_steam_fast_sig_coh3_only_and_ignores_other_games(self) -> None:
         state_payload = {
@@ -100,13 +110,14 @@ class TestSchedulerSharedRoster(unittest.TestCase):
                     ([], [], []),
                 )
             ),
-            # fast[0] = Veteranos no CoH3 (inclui Razi e arc sec via Steam Web API),
+            # fast[0] = Veteranos no CoH3 (inclui Razi, arc sec e Chacineiro smurf via Steam Web API),
             # fast[1] = Online/outros jogos (nigo_BR em Marvel Rivals — NÃO deve ser incluído!)
             "last_steam_fast_sig": repr(
                 (
                     [
                         ("76561198080023560", False, False, False, "Razi"),
                         ("76561199482388323", False, False, False, "arc"),
+                        ("76561198698969876", False, False, False, "Charles Bronson"),
                         ("76561199999999999", False, False, False, "DesconhecidoNaoMonitorado"),
                     ],
                     [
@@ -117,7 +128,7 @@ class TestSchedulerSharedRoster(unittest.TestCase):
             ),
         }
         active = precheck._parse_radar_state_active_pids(state_payload)
-        self.assertEqual(active, {79327, 639157, 110078, 81751, 1423426})
+        self.assertEqual(active, {79327, 639157, 110078, 81751, 1423426, 1333418})
         self.assertNotIn(26910, active)
         self.assertNotIn(735940, active)
 
