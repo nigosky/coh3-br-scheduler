@@ -2,10 +2,11 @@
 """
 Pré-checagem inteligente (stdlib-only, TLS 1.2+) com loop contínuo de 5 min para `nigosky/coh3-br-scheduler`.
 
-Consulta diretamente a API pública da Relic (`getRecentMatchHistoryByProfileId`) das 45 contas Steam
-monitoradas (cobrindo tanto Automatch ranqueadas quanto partidas Customizadas!) a cada 5 minutos
-durante uma sessão autônoma de 60 minutos (12 ciclos) e dispara (`workflow_dispatch`) o repositório
-privado `nigosky/coh3-br-tracker` imediatamente assim que qualquer partida nova termina!
+Consulta diretamente a API pública da Relic (`getRecentMatchHistoryByProfileId`) das contas Steam
+monitoradas (sincronizadas da base compartilhada `players_roster.json`, com fallback embutido de 46 contas,
+cobrindo tanto Automatch ranqueadas quanto partidas Customizadas!) a cada 5 minutos durante uma sessão
+autônoma de 60 minutos (12 ciclos) e dispara (`workflow_dispatch`) o repositório privado
+`nigosky/coh3-br-tracker` imediatamente assim que qualquer partida nova termina!
 
 Resultado:
 - Detecção pontual a cada 5 minutos 24h/dia (sem sofrer com atrasos ou descartes do cron do GitHub Actions).
@@ -55,6 +56,7 @@ BG_FOLLOWUP_TTL_SEC = 2700  # Descarta agendamento se ficar obsoleto (>45 min)
 URL_FORBIDDEN_CHARS_RE = re.compile(r"[\x00-\x20\x7f]")
 SAFE_GH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 SAFE_GH_REF_RE = re.compile(r"^[A-Za-z0-9_./-]{1,128}$")
+STEAM_ID64_VALID_RE = re.compile(r"^7656119\d{10}$")
 
 # Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível
 FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
@@ -106,10 +108,79 @@ FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (975688, "Kefbr"),
 )
 
+# Mapa fallback SteamID64 -> profile_id (permite consumir `last_steam_fast_sig[0]` do Radar sem usar chave Steam)
+FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
+    "76561197963172584": 79327,    # Chacineiro
+    "76561198115923932": 991764,   # SaNgar [BR]
+    "76561198108568598": 1088455,  # luiz_fmh
+    "76561198034510845": 735940,   # Jimmy Duelista
+    "76561198062871244": 559962,   # Gabe
+    "76561198372757032": 648514,   # Halokoo
+    "76561198121484554": 35952,    # Sauronzinho
+    "76561198070545853": 900358,   # Margheriti
+    "76561198001604015": 691,      # Vítor
+    "76561198205052385": 5768,     # The Dog
+    "76561198284234077": 13450,    # 7 DIVISAO PHANTOM
+    "76561198058548575": 19747,    # twitch.tv/luck22ai
+    "76561198063124280": 944488,   # gbytes™
+    "76561198061434984": 21206,    # hjax
+    "76561198053226112": 509690,   # Alekel
+    "76561198024118058": 1114404,  # Vikitor
+    "76561198014985380": 366826,   # Lem22
+    "76561198028644178": 1282592,  # SapoBoi_BR
+    "76561197979883434": 639157,   # Itaperuna
+    "76561198024839791": 110078,   # Bineto
+    "76561198105073246": 1143262,  # Mazzaroppee
+    "76561197996817129": 55693,    # BinhoBiceps
+    "76561197981615184": 337051,   # Maiti
+    "76561198264285149": 1022333,  # gaules
+    "76561197986271242": 32922,    # Showtaro
+    "76561198005412401": 153969,   # Cunha
+    "76561199538846112": 557890,   # Gabe (sec)
+    "76561197963741792": 26910,    # nigo_BR ᵀᴹ
+    "76561198135142137": 6557,     # Dragoness
+    "76561198140782132": 1226910,  # Lupus Alba
+    "76561198054318813": 3895,     # Liquid
+    "76561199791811246": 1005730,  # arc
+    "76561199482388323": 1423426,  # arc (sec)
+    "76561197985268629": 31145,    # vonMises
+    "76561197993922195": 58737,    # INFIEL
+    "76561198000099422": 431802,   # Conflict.BR
+    "76561198123446420": 59864,    # Lion Heart
+    "76561198076576055": 84821,    # TJBR
+    "76561198021071716": 99722,    # MonteiroBR
+    "76561198009056438": 31061,    # ACB
+    "76561198080023560": 81751,    # Razi
+    "76561198089948995": 28937,    # Mjr Bruno
+    "76561198026394732": 737235,   # meuqsaco
+    "76561198028378060": 23250,    # Nargoth
+    "76561199498421192": 1097608,  # Winter Animal
+    "76561197994245218": 975688,   # Kefbr
+}
+
 MONITORED_PROFILES: tuple[tuple[int, str], ...] = FALLBACK_MONITORED_PROFILES
 MONITORED_PID_SET: frozenset[int] = frozenset(pid for pid, _ in MONITORED_PROFILES)
+STEAM_ID_TO_PID: dict[str, int] = dict(FALLBACK_STEAM_ID_TO_PID)
+_LAST_FETCHED_STEAM_ID_TO_PID: dict[str, int] = {}
 
 _TLS_LOCALS = threading.local()
+
+
+class _HttpsOnlySchemeHandler(urllib.request.BaseHandler):
+    """Bloqueia no nível do OpenerDirector qualquer esquema fora de HTTPS (defesa em profundidade anti-SSRF/LFI)."""
+
+    handler_order = 100
+
+    def default_open(self, req: Any) -> Any:
+        scheme = str(getattr(req, "type", "") or "").lower()
+        if scheme != "https":
+            raise urllib.error.URLError(f"Esquema '{scheme or '<vazio>'}' bloqueado pela política HTTPS-only.")
+        return None
+
+    http_open = default_open
+    ftp_open = default_open
+    file_open = default_open
+    data_open = default_open
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -126,12 +197,21 @@ def _get_opener() -> urllib.request.OpenerDirector:
         ctx.verify_mode = ssl.CERT_REQUIRED
         if hasattr(ssl, "OP_NO_COMPRESSION"):
             ctx.options |= ssl.OP_NO_COMPRESSION
-        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx), _NoRedirectHandler())
+        opener = urllib.request.build_opener(
+            _HttpsOnlySchemeHandler(),
+            urllib.request.HTTPSHandler(context=ctx),
+            _NoRedirectHandler(),
+        )
         _TLS_LOCALS.opener = opener
     return opener
 
 
-def _validate_outbound_https(url: str, allowed_host: str, path_prefix: str = "/") -> urllib.parse.ParseResult:
+def _validate_outbound_https(
+    url: str,
+    allowed_host: str,
+    path_prefix: str = "/",
+    allow_query: bool = True,
+) -> urllib.parse.ParseResult:
     """Valida esquema HTTPS, host exato, porta 443, ausência de credenciais/controles e prefixo de caminho."""
     clean = (url or "").strip()
     if not clean or URL_FORBIDDEN_CHARS_RE.search(clean):
@@ -145,6 +225,8 @@ def _validate_outbound_https(url: str, allowed_host: str, path_prefix: str = "/"
         raise ValueError("Porta fora do padrão HTTPS (443) bloqueada.")
     if path_prefix and not (parsed.path or "").startswith(path_prefix):
         raise ValueError("Caminho de URL fora do escopo autorizado.")
+    if not allow_query and (parsed.query or parsed.fragment or "?" in clean or "#" in clean):
+        raise ValueError("Query string ou fragmento não permitido nesta URL.")
     return parsed
 
 
@@ -196,17 +278,82 @@ def _extract_pids_from_seq(seq: Any) -> set[int]:
     return out
 
 
+def _extract_steam_id(raw: Any) -> str:
+    s = str(raw or "").strip()
+    if s.startswith("/steam/"):
+        s = s[7:].strip()
+    return s if STEAM_ID64_VALID_RE.fullmatch(s) else ""
+
+
+def _extract_steam_ids_from_seq(seq: Any) -> set[str]:
+    out: set[str] = set()
+    if not isinstance(seq, (list, tuple, set)):
+        return out
+    for item in seq:
+        candidate = item[0] if isinstance(item, (list, tuple)) and item else item
+        sid = _extract_steam_id(candidate)
+        if sid:
+            out.add(sid)
+    return out
+
+
+def _parse_radar_state_active_pids(
+    data: dict[str, Any],
+    monitored_pids: frozenset[int] | None = None,
+    steam_id_to_pid: dict[str, int] | None = None,
+) -> set[int]:
+    """
+    Extrai os `profile_id`s de Veteranos em atividade CoH3 recente do `state.json` público do Radar:
+    1. `last_alert_coh3_pids`
+    2. `last_digest` (`vet_in_coh3` + `vet_recent_relic`)
+    3. `last_steam_fast_sig[0]` (lista de SteamID64s em CoH3 na passada rápida Web API/XML; ignora `fast[1]` de outros jogos)
+    """
+    allowed_pids = MONITORED_PID_SET if monitored_pids is None else monitored_pids
+    sid_map = STEAM_ID_TO_PID if steam_id_to_pid is None else steam_id_to_pid
+
+    active_pids: set[int] = set()
+    active_pids.update(_extract_pids_from_seq(data.get("last_alert_coh3_pids")))
+
+    raw_digest = data.get("last_digest")
+    if isinstance(raw_digest, str) and 2 <= len(raw_digest) <= 65536:
+        try:
+            dig = ast.literal_eval(raw_digest)
+            if isinstance(dig, tuple) and dig and isinstance(dig[0], tuple):
+                vet_tuple = dig[0]
+                if len(vet_tuple) >= 1:
+                    active_pids.update(_extract_pids_from_seq(vet_tuple[0]))
+                if len(vet_tuple) >= 3:
+                    active_pids.update(_extract_pids_from_seq(vet_tuple[2]))
+        except (ValueError, SyntaxError, TypeError, RecursionError, MemoryError):
+            pass
+
+    raw_fast_sig = data.get("last_steam_fast_sig")
+    if isinstance(raw_fast_sig, str) and 2 <= len(raw_fast_sig) <= 65536:
+        try:
+            fast = ast.literal_eval(raw_fast_sig)
+            if isinstance(fast, tuple) and fast:
+                for sid in _extract_steam_ids_from_seq(fast[0]):
+                    mapped_pid = sid_map.get(sid)
+                    if mapped_pid is not None and mapped_pid > 0:
+                        active_pids.add(int(mapped_pid))
+        except (ValueError, SyntaxError, TypeError, RecursionError, MemoryError):
+            pass
+
+    return active_pids & allowed_pids
+
+
 def fetch_veteranos_radar_active_pids(max_age_sec: int = RADAR_MAX_AGE_SEC) -> tuple[set[int], int, bool]:
     """
     Lê (estritamente somente-leitura) o `state.json` público do Radar dos Veteranos
     (`nigosky/coh3-br-lobby-radar`) e retorna `(active_pids, last_sync_ts, ok)`.
+    Não exige nem manipula `STEAM_WEB_API_KEY`.
     """
-    parsed = _validate_outbound_https(RADAR_STATE_URL, RADAR_HOST, path_prefix=RADAR_STATE_PATH)
+    parsed = _validate_outbound_https(RADAR_STATE_URL, RADAR_HOST, path_prefix=RADAR_STATE_PATH, allow_query=False)
     if parsed.path != RADAR_STATE_PATH:
         raise ValueError("Caminho do Radar fora da allowlist.")
 
     headers = {
-        "User-Agent": "CoH3-BR-SmartScheduler/2.1",
+        "User-Agent": "CoH3-BR-SmartScheduler/2.3",
         "Accept": "application/json",
         "Accept-Encoding": "gzip",
         "Cache-Control": "no-cache",
@@ -222,31 +369,15 @@ def fetch_veteranos_radar_active_pids(max_age_sec: int = RADAR_MAX_AGE_SEC) -> t
             if max_age_sec > 0 and last_sync_ts > 0 and (now_ts - last_sync_ts) > max_age_sec:
                 return set(), last_sync_ts, False
 
-            active_pids: set[int] = set()
-            active_pids.update(_extract_pids_from_seq(data.get("last_alert_coh3_pids")))
-
-            raw_digest = data.get("last_digest")
-            if isinstance(raw_digest, str) and 2 <= len(raw_digest) <= 65536:
-                try:
-                    dig = ast.literal_eval(raw_digest)
-                    if isinstance(dig, tuple) and dig and isinstance(dig[0], tuple):
-                        vet_tuple = dig[0]
-                        if len(vet_tuple) >= 1:
-                            active_pids.update(_extract_pids_from_seq(vet_tuple[0]))
-                        if len(vet_tuple) >= 3:
-                            active_pids.update(_extract_pids_from_seq(vet_tuple[2]))
-                except (ValueError, SyntaxError, TypeError, RecursionError, MemoryError):
-                    pass
-
-            return active_pids & MONITORED_PID_SET, last_sync_ts, True
+            return _parse_radar_state_active_pids(data), last_sync_ts, True
         except Exception:
             if attempt == 0:
                 time.sleep(0.6)
     return set(), 0, False
 
 
-def parse_shared_roster_profiles(data: dict[str, Any]) -> tuple[tuple[int, str], ...]:
-    """Extrai `(profile_id, alias)` de todos os Veteranos da base compartilhada `players_roster.json`."""
+def parse_shared_roster_details(data: dict[str, Any]) -> tuple[tuple[tuple[int, str], ...], dict[str, int]]:
+    """Extrai `(profiles, steam_id_to_pid)` de todos os Veteranos da base compartilhada `players_roster.json`."""
     if not isinstance(data, dict) or int(data.get("schema_version", 0) or 0) < 1:
         raise ValueError("Formato inválido de players_roster.json.")
     raw_vets = data.get("veteranos")
@@ -254,6 +385,7 @@ def parse_shared_roster_profiles(data: dict[str, Any]) -> tuple[tuple[int, str],
         raise ValueError("Lista 'veteranos' ausente ou vazia em players_roster.json.")
 
     profiles: list[tuple[int, str]] = []
+    steam_to_pid: dict[str, int] = {}
     seen_pids: set[int] = set()
     for row in raw_vets:
         if not isinstance(row, dict):
@@ -269,10 +401,19 @@ def parse_shared_roster_profiles(data: dict[str, Any]) -> tuple[tuple[int, str],
         if int(row.get("merged_into_profile_id", 0) or 0) > 0 and "(sec)" not in alias:
             alias = f"{alias} (sec)"
         profiles.append((pid, alias))
+        sid = _extract_steam_id(row.get("steam_id"))
+        if sid and sid not in steam_to_pid:
+            steam_to_pid[sid] = pid
 
     if not profiles:
         raise ValueError("Nenhum profile_id válido encontrado em players_roster.json.")
-    return tuple(profiles)
+    return tuple(profiles), steam_to_pid
+
+
+def parse_shared_roster_profiles(data: dict[str, Any]) -> tuple[tuple[int, str], ...]:
+    """Extrai `(profile_id, alias)` de todos os Veteranos da base compartilhada `players_roster.json`."""
+    profiles, _ = parse_shared_roster_details(data)
+    return profiles
 
 
 def fetch_shared_monitored_profiles(url: str = SHARED_ROSTER_URL) -> tuple[tuple[int, str], ...] | None:
@@ -280,12 +421,13 @@ def fetch_shared_monitored_profiles(url: str = SHARED_ROSTER_URL) -> tuple[tuple
     Lê a base compartilhada `players_roster.json` (`nigosky/coh3-br-lobby-radar`) via HTTPS validado.
     Retorna `None` em caso de falha transitória (mantendo fallback seguro).
     """
-    parsed = _validate_outbound_https(url, RADAR_HOST, path_prefix=SHARED_ROSTER_PATH)
+    global _LAST_FETCHED_STEAM_ID_TO_PID
+    parsed = _validate_outbound_https(url, RADAR_HOST, path_prefix=SHARED_ROSTER_PATH, allow_query=False)
     if parsed.path != SHARED_ROSTER_PATH:
         raise ValueError("Caminho do roster compartilhado fora da allowlist.")
 
     headers = {
-        "User-Agent": "CoH3-BR-SmartScheduler/2.2",
+        "User-Agent": "CoH3-BR-SmartScheduler/2.3",
         "Accept": "application/json",
         "Accept-Encoding": "gzip",
         "Cache-Control": "no-cache",
@@ -295,7 +437,9 @@ def fetch_shared_monitored_profiles(url: str = SHARED_ROSTER_URL) -> tuple[tuple
         try:
             with _get_opener().open(req, timeout=8) as resp:
                 data = _read_bounded_json(resp, max_bytes=MAX_RADAR_BYTES)
-            return parse_shared_roster_profiles(data)
+            profiles, sid_map = parse_shared_roster_details(data)
+            _LAST_FETCHED_STEAM_ID_TO_PID = dict(sid_map)
+            return profiles
         except Exception:
             if attempt == 0:
                 time.sleep(0.6)
@@ -303,13 +447,21 @@ def fetch_shared_monitored_profiles(url: str = SHARED_ROSTER_URL) -> tuple[tuple
 
 
 def refresh_monitored_profiles(url: str = SHARED_ROSTER_URL) -> bool:
-    """Atualiza `MONITORED_PROFILES` e `MONITORED_PID_SET` a partir da base única compartilhada."""
-    global MONITORED_PROFILES, MONITORED_PID_SET
+    """Atualiza `MONITORED_PROFILES`, `MONITORED_PID_SET` e `STEAM_ID_TO_PID` a partir da base compartilhada."""
+    global MONITORED_PROFILES, MONITORED_PID_SET, STEAM_ID_TO_PID, _LAST_FETCHED_STEAM_ID_TO_PID
+    _LAST_FETCHED_STEAM_ID_TO_PID = {}
     fetched = fetch_shared_monitored_profiles(url=url)
     if fetched is None:
         return False
+    new_pid_set = frozenset(pid for pid, _ in fetched)
     MONITORED_PROFILES = fetched
-    MONITORED_PID_SET = frozenset(pid for pid, _ in fetched)
+    MONITORED_PID_SET = new_pid_set
+    if _LAST_FETCHED_STEAM_ID_TO_PID:
+        STEAM_ID_TO_PID = {
+            sid: pid for sid, pid in _LAST_FETCHED_STEAM_ID_TO_PID.items() if pid in new_pid_set
+        }
+    else:
+        STEAM_ID_TO_PID = {sid: pid for sid, pid in STEAM_ID_TO_PID.items() if pid in new_pid_set}
     return True
 
 
@@ -435,11 +587,11 @@ def dispatch_private_tracker(
         raise ValueError("Parâmetro GitHub inválido (ref).")
 
     url = f"https://{GITHUB_API_HOST}/repos/{owner.strip()}/{repo.strip()}/actions/workflows/{workflow.strip()}/dispatches"
-    _validate_outbound_https(url, GITHUB_API_HOST, path_prefix="/repos/")
+    _validate_outbound_https(url, GITHUB_API_HOST, path_prefix="/repos/", allow_query=False)
 
     body = json.dumps({"ref": clean_ref}).encode("utf-8")
     headers = {
-        "User-Agent": "CoH3-BR-SmartScheduler/2.1",
+        "User-Agent": "CoH3-BR-SmartScheduler/2.3",
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {clean_token}",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -466,7 +618,7 @@ def dispatch_private_tracker(
 
 
 def load_state(state_path: Path) -> dict[str, Any]:
-    if not state_path.is_file():
+    if not state_path.is_file() or state_path.is_symlink():
         return {}
     try:
         parsed = json.loads(state_path.read_text(encoding="utf-8"))
@@ -476,6 +628,8 @@ def load_state(state_path: Path) -> dict[str, Any]:
 
 
 def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    if path.is_symlink():
+        raise RuntimeError(f"Escrita bloqueada em symlink não confiável: {path}")
     payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     fd, tmp_name = tempfile.mkstemp(prefix=".state_", suffix=".tmp", dir=str(path.parent))
     try:
