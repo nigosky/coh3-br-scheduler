@@ -86,8 +86,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Bloqueia qualquer padrao de token GitHub/Discord em arquivos rastreados antes de commitar
-          if grep -RInE "(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|discord(app)?\.com/api/(v[0-9]+/)?webhooks/[0-9]+)" state.json *.py 2>/dev/null; then
+          # Bloqueia qualquer padrao de token GitHub/Discord/Steam/chave privada em TODOS os arquivos rastreados
+          SECRET_PATTERN="(ptb\.|canary\.)?discord(app)?\.com/api/(v[0-9]+/)?webhooks/[0-9]+|STEAM_WEB_API_KEY=[A-Za-z0-9]{16,}|[?&]key=[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+          if git ls-files -z | xargs -0 grep -InE "${SECRET_PATTERN}" 2>/dev/null; then
             echo "::error::Bloqueio de seguranca acionado: padrao de credencial detectado em arquivo rastreado!"
             exit 1
           fi
@@ -131,6 +132,11 @@ jobs:
           if [ "${EVENT_NAME}" = "workflow_dispatch" ] && [ "${AUTO_RELAY_INPUT:-true}" = "false" ]; then
             echo "Execucao unica solicitada (auto_relay=false); nao agendando proxima sessao."
             exit 0
+          fi
+
+          if ! [[ "${GITHUB_RUN_ID:-}" =~ ^[0-9]+$ ]]; then
+            echo "::error::GITHUB_RUN_ID invalido."
+            exit 1
           fi
 
           # Dupla checagem anti-duplicidade: se ja houver outra sessao na fila/em andamento, nao empilha outra!
