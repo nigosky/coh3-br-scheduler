@@ -186,6 +186,87 @@ class TestSchedulerSharedRoster(unittest.TestCase):
         )
         self.assertEqual(parsed, {"ok": True})
 
+    def test_quiet_period_hourly_personalstat_audit_catches_missed_private_player(self) -> None:
+        import json
+
+        now_ts = 1_795_536_000  # 2026-11-24 16:00:00 UTC (terça-feira)
+        precheck.MONITORED_PROFILES = ((79327, "Chacineiro"), (3895, "Liquid"))
+        precheck.MONITORED_PID_SET = frozenset({79327, 3895})
+
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "state.json"
+            # Último disparo há 1h10m (>1h, <3h heartbeat) e nenhuma partida nova na 1ª passada
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "last_dispatch_ts": now_ts - 4200,
+                        "last_full_stat_audit_ts": now_ts - 4200,
+                        "players": {
+                            "79327": {"max_match_id": 100, "max_completion_time": now_ts - 7200},
+                            "3895": {"max_match_id": 200, "max_completion_time": now_ts - 7200},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def _fake_marker(pid: int) -> tuple[int, int, int, bool, int, int]:
+                mid = 100 if pid == 79327 else 200
+                return (pid, mid, now_ts - 7200, True, mid, now_ts - 7200)
+
+            # Caso 1: apenas +1s de drift em 3895 -> auditoria roda, mas NÃO dispara falso positivo
+            with (
+                patch.object(precheck.time, "time", return_value=now_ts),
+                patch.object(precheck, "fetch_latest_player_marker", side_effect=_fake_marker),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=(set(), now_ts, True)),
+                patch.object(
+                    precheck,
+                    "fetch_personal_stat_last_match",
+                    return_value={79327: now_ts - 7200, 3895: now_ts - 7199},
+                ) as mock_ps,
+            ):
+                should_disp, _ok, reason, meta = precheck.evaluate_precheck(state_path=state_path, dry_run=True)
+                self.assertFalse(should_disp)
+                self.assertTrue(meta["full_stat_audit_ran"])
+                self.assertIn("auditoria silencio 1h OK", reason)
+                mock_ps.assert_called_once_with([3895, 79327])
+
+            # Caso 2: dentro do cooldown de 1h em memória -> não repete getPersonalStat completo
+            with (
+                patch.object(precheck.time, "time", return_value=now_ts + 300),
+                patch.object(precheck, "fetch_latest_player_marker", side_effect=_fake_marker),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=(set(), now_ts + 300, True)),
+                patch.object(precheck, "fetch_personal_stat_last_match") as mock_ps_skip,
+            ):
+                should_disp2, _ok2, _reason2, meta2 = precheck.evaluate_precheck(
+                    state_path=state_path,
+                    dry_run=True,
+                    last_full_stat_audit_ts_override=now_ts,
+                )
+                self.assertFalse(should_disp2)
+                self.assertFalse(meta2["full_stat_audit_ran"])
+                mock_ps_skip.assert_not_called()
+
+            # Caso 3: jogador com Steam privado (fora do Radar) teve partida real (+1h à frente) -> dispara imediatamente!
+            with (
+                patch.object(precheck.time, "time", return_value=now_ts),
+                patch.object(precheck, "fetch_latest_player_marker", side_effect=_fake_marker),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=(set(), now_ts, True)),
+                patch.object(
+                    precheck,
+                    "fetch_personal_stat_last_match",
+                    return_value={79327: now_ts - 600, 3895: now_ts - 7199},
+                ),
+            ):
+                should_disp3, ok3, reason3, meta3 = precheck.evaluate_precheck(state_path=state_path, dry_run=True)
+                self.assertTrue(should_disp3)
+                self.assertTrue(ok3)
+                self.assertTrue(meta3["full_stat_audit_ran"])
+                self.assertIn("Auditoria de silencio (1h)", reason3)
+                self.assertIn("Chacineiro", reason3)
+                self.assertNotIn("Liquid", reason3)
+
 
 if __name__ == "__main__":
     unittest.main()
