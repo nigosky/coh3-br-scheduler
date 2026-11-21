@@ -1,6 +1,6 @@
 {
-  "last_checked_ts": 1795243636,
-  "last_dispatch_ts": 1795243636,
+  "last_checked_ts": 1795254485,
+  "last_dispatch_ts": 1795254485,
   "last_weekly_summary_iso_week": "",
   "pending_bg_followup_due_ts": 0,
   "pending_bg_followup_match_id": 0,
@@ -222,6 +222,6 @@
     }
   },
   "radar_coh3_pids": [],
-  "radar_last_sync_ts": 1795243241,
+  "radar_last_sync_ts": 1795253934,
   "schema_version": 2
 }
