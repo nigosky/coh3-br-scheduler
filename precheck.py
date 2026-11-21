@@ -48,7 +48,10 @@ MAX_HTTP_BYTES = 5 * 1024 * 1024  # 5 MB limite estrito anti-Gzip-bomb
 MAX_RADAR_BYTES = 256 * 1024  # 256 KB limite estrito para state.json e players_roster.json
 RADAR_MAX_AGE_SEC = 7200  # Ignora estado do Radar se estiver há >2h sem sincronizar
 BRT_TZ = timezone(timedelta(hours=-3))
-HEARTBEAT_INTERVAL_SEC = 3 * 3600  # Garante 1 disparo de segurança a cada 3h (limpeza 72h, Open Data, retries)
+HEARTBEAT_INTERVAL_SEC = 3 * 3600  # Garante 1 disparo de segurança a cada 3h (auditoria profunda, limpeza 72h, Open Data)
+QUIET_PERSONAL_STAT_AUDIT_SEC = 3600  # Após 1h sem partidas, varre getPersonalStat em 100% do elenco a cada 1h
+QUIET_STAT_TOLERANCE_SEC = 60  # Margem segura acima do drift normal (+1s) do lastmatchdate da Relic
+QUIET_STAT_RECENT_WINDOW_SEC = 72 * 3600  # Considera apenas partidas recentes (<=72h) na auditoria silenciosa
 AUTOMATCH_TYPE_IDS: frozenset[int] = frozenset({1, 2, 3, 4, 20, 21, 22, 23})  # 1v1..4v4 Automatch CoH3 (exclui Custom=0)
 BG_FOLLOWUP_FRESH_MATCH_SEC = 300  # Partida Automatch encerrada há <5 min pode ainda estar sendo parseada no cohdb.com
 BG_FOLLOWUP_DELAY_SEC = 240  # Agenda 1 disparo único de confirmação no próximo ciclo de 5 min (+4-5 min)
@@ -701,9 +704,10 @@ def evaluate_precheck(
     target_workflow: str = "coh3_monitor.yml",
     target_ref: str = "main",
     prev_radar_pids_override: set[int] | None = None,
+    last_full_stat_audit_ts_override: int | None = None,
 ) -> tuple[bool, bool, str, dict[str, Any]]:
     """
-    Executa 1 ciclo de pré-checagem (Relic History + Radar dos Veteranos + Relic PersonalStat).
+    Executa 1 ciclo de pré-checagem (Relic History + Radar dos Veteranos + Relic PersonalStat + Auditoria de Silêncio 1h).
     Retorna `(should_dispatch, dispatched_ok, reason_str, meta)`.
     Importante: só avança `state.json` se `dispatched_ok` for True (evita perder partidas caso o dispatch falhe).
     """
@@ -718,6 +722,10 @@ def evaluate_precheck(
     last_weekly_week = str(prev.get("last_weekly_summary_iso_week") or "")
     prev_bg_due_ts = int(prev.get("pending_bg_followup_due_ts", 0) or 0)
     prev_bg_match_id = int(prev.get("pending_bg_followup_match_id", 0) or 0)
+    prev_full_audit_ts = max(
+        int(prev.get("last_full_stat_audit_ts", 0) or 0),
+        int(last_full_stat_audit_ts_override or 0),
+    )
     prev_radar_pids = (
         set(prev_radar_pids_override)
         if prev_radar_pids_override is not None
@@ -725,8 +733,9 @@ def evaluate_precheck(
     )
 
     alias_by_pid = {pid: alias for pid, alias in MONITORED_PROFILES}
+    all_monitored_pids = [pid for pid, _ in MONITORED_PROFILES]
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
-        results = list(pool.map(fetch_latest_player_marker, [pid for pid, _ in MONITORED_PROFILES]))
+        results = list(pool.map(fetch_latest_player_marker, all_monitored_pids))
 
     # Checagem cruzada somente-leitura com o Radar dos Veteranos (nigosky/coh3-br-lobby-radar)
     curr_radar_pids, radar_sync_ts, radar_ok = fetch_veteranos_radar_active_pids()
@@ -737,14 +746,25 @@ def evaluate_precheck(
         pid: (pid, mid, ct, ok, a_mid, a_ct) for pid, mid, ct, ok, a_mid, a_ct in results
     }
 
-    # Rechecagem prioritária imediata se um Veterano ativo/saindo do Radar falhou na 1ª passada da Relic
+    run_full_stat_audit = bool(
+        prev_players
+        and last_dispatch_ts > 0
+        and (now_ts - last_dispatch_ts) >= QUIET_PERSONAL_STAT_AUDIT_SEC
+        and (now_ts - prev_full_audit_ts) >= QUIET_PERSONAL_STAT_AUDIT_SEC
+    )
+
+    # Rechecagem prioritária imediata se um Veterano ativo/saindo do Radar (ou qualquer conta na auditoria de silêncio 1h) falhou na 1ª passada
+    retry_candidate_pids = set(focus_radar_pids)
+    if run_full_stat_audit:
+        retry_candidate_pids.update(pid for pid, rec in results_by_pid.items() if not rec[3])
+
     radar_failed_aliases: list[str] = []
-    for fpid in sorted(focus_radar_pids):
+    for fpid in sorted(retry_candidate_pids):
         _, _, _, ok_first, _, _ = results_by_pid.get(fpid, (fpid, 0, 0, False, 0, 0))
         if not ok_first:
             retry_res = fetch_latest_player_marker(fpid)
             results_by_pid[fpid] = retry_res
-            if not retry_res[3]:
+            if not retry_res[3] and fpid in focus_radar_pids:
                 radar_failed_aliases.append(alias_by_pid.get(fpid, str(fpid)))
 
     ok_count = 0
@@ -785,11 +805,15 @@ def evaluate_precheck(
             entry_next["max_stat_lmd"] = max(old_stat_lmd, entry_next["max_completion_time"])
         updated_players[key] = entry_next
 
-    # Cross-check Relic getPersonalStat (1 única requisição leve!) para Veteranos sinalizados pelo Radar
+    # Cross-check Relic getPersonalStat:
+    # - A cada 5 min para Veteranos sinalizados pelo Radar
+    # - A cada 1h de silêncio, varredura completa em 100% do elenco (inclusive Steam privado!)
     radar_stat_triggers: list[str] = []
-    if focus_radar_pids:
-        stat_lmd_map = fetch_personal_stat_last_match(sorted(focus_radar_pids))
-        for fpid in sorted(focus_radar_pids):
+    quiet_stat_triggers: list[str] = []
+    stat_target_pids = sorted(set(all_monitored_pids) if run_full_stat_audit else focus_radar_pids)
+    if stat_target_pids:
+        stat_lmd_map = fetch_personal_stat_last_match(stat_target_pids)
+        for fpid in stat_target_pids:
             stat_lmd = int(stat_lmd_map.get(fpid, 0) or 0)
             if stat_lmd <= 0:
                 continue
@@ -805,8 +829,16 @@ def evaluate_precheck(
             )
             cur_slot["max_stat_lmd"] = max(stat_lmd, baseline_ts, int(cur_slot.get("max_completion_time", 0) or 0))
 
-            if prev_players and fpid not in new_activity_pids and stat_lmd > (baseline_ts + 10):
-                radar_stat_triggers.append(alias_by_pid.get(fpid, str(fpid)))
+            if not prev_players or fpid in new_activity_pids:
+                continue
+            if fpid in focus_radar_pids:
+                if stat_lmd > (baseline_ts + 10):
+                    radar_stat_triggers.append(alias_by_pid.get(fpid, str(fpid)))
+            elif (
+                (now_ts - stat_lmd) <= QUIET_STAT_RECENT_WINDOW_SEC
+                and stat_lmd > (baseline_ts + QUIET_STAT_TOLERANCE_SEC)
+            ):
+                quiet_stat_triggers.append(alias_by_pid.get(fpid, str(fpid)))
 
     reasons: list[str] = []
     mark_weekly_done = False
@@ -823,6 +855,10 @@ def evaluate_precheck(
         sample_r = ", ".join(radar_stat_triggers[:4])
         extra_r = f" +{len(radar_stat_triggers) - 4}" if len(radar_stat_triggers) > 4 else ""
         reasons.append(f"Radar Veteranos + Relic PersonalStat detectou partida recente: {sample_r}{extra_r}")
+    if quiet_stat_triggers:
+        sample_q = ", ".join(quiet_stat_triggers[:4])
+        extra_q = f" +{len(quiet_stat_triggers) - 4}" if len(quiet_stat_triggers) > 4 else ""
+        reasons.append(f"Auditoria de silencio (1h) + Relic PersonalStat detectou partida recente: {sample_q}{extra_q}")
     if radar_failed_aliases:
         sample_f = ", ".join(radar_failed_aliases[:4])
         reasons.append(f"Radar Veteranos: fallback p/ rechecagem Relic ({sample_f})")
@@ -831,7 +867,7 @@ def evaluate_precheck(
         and now_ts >= prev_bg_due_ts
         and (now_ts - prev_bg_due_ts) <= BG_FOLLOWUP_TTL_SEC
     )
-    if bg_followup_due and not new_activity_players and not radar_stat_triggers:
+    if bg_followup_due and not new_activity_players and not radar_stat_triggers and not quiet_stat_triggers:
         mid_hint = f" #{prev_bg_match_id}" if prev_bg_match_id > 0 else ""
         reasons.append(f"confirmacao de Battlegroups cohdb (+5 min apos partida{mid_hint})")
     if now_brt.weekday() == 0 and (now_brt.hour, now_brt.minute) >= (0, 5) and last_weekly_week != current_iso_week:
@@ -841,13 +877,14 @@ def evaluate_precheck(
         reasons.append("fallback de seguranca (Relic API indisponivel na pre-checagem)")
     elif last_dispatch_ts <= 0 or (now_ts - last_dispatch_ts) >= HEARTBEAT_INTERVAL_SEC:
         elapsed_h = round((now_ts - last_dispatch_ts) / 3600.0, 1) if last_dispatch_ts > 0 else 0.0
-        reasons.append(f"heartbeat periodico de seguranca ({elapsed_h}h desde ultimo ciclo)")
+        reasons.append(f"heartbeat periodico de auditoria profunda ({elapsed_h}h desde ultimo ciclo)")
 
     should_dispatch = len(reasons) > 0
+    audit_suffix = " | auditoria silencio 1h OK (100% PersonalStat)" if run_full_stat_audit else ""
     reason_str = (
         " | ".join(reasons)
         if reasons
-        else f"sem novas partidas ({ok_count}/{len(MONITORED_PROFILES)} contas verificadas)"
+        else f"sem novas partidas ({ok_count}/{len(MONITORED_PROFILES)} contas verificadas{audit_suffix})"
     )
 
     dispatched_ok = False
@@ -870,7 +907,7 @@ def evaluate_precheck(
             http_code = 0
 
     if should_dispatch and dispatched_ok and not dry_run:
-        if fresh_automatch_mid > 0 or radar_stat_triggers:
+        if fresh_automatch_mid > 0 or radar_stat_triggers or quiet_stat_triggers:
             next_bg_due_ts = now_ts + BG_FOLLOWUP_DELAY_SEC
             next_bg_mid = fresh_automatch_mid
         elif prev_bg_due_ts > 0 and now_ts < (prev_bg_due_ts - 60):
@@ -883,6 +920,7 @@ def evaluate_precheck(
             "schema_version": 2,
             "last_checked_ts": now_ts,
             "last_dispatch_ts": now_ts,
+            "last_full_stat_audit_ts": now_ts if run_full_stat_audit else prev_full_audit_ts,
             "last_weekly_summary_iso_week": current_iso_week if mark_weekly_done else last_weekly_week,
             "pending_bg_followup_due_ts": next_bg_due_ts,
             "pending_bg_followup_match_id": next_bg_mid,
@@ -899,6 +937,8 @@ def evaluate_precheck(
         "radar_ok": radar_ok,
         "radar_active_pids": sorted(curr_radar_pids),
         "radar_exited_pids": sorted(exited_radar_pids),
+        "full_stat_audit_ran": run_full_stat_audit,
+        "full_stat_audit_ts": now_ts if run_full_stat_audit else prev_full_audit_ts,
     }
     return should_dispatch, dispatched_ok, reason_str, meta
 
@@ -936,6 +976,7 @@ def main() -> int:
     last_ok_str = f"0/{len(MONITORED_PROFILES)}"
     dispatch_events: list[str] = []
     mem_radar_pids: set[int] | None = None
+    mem_last_full_stat_audit_ts: int | None = None
 
     for idx in range(1, cycles + 1):
         cycle_start = time.monotonic()
@@ -958,9 +999,12 @@ def main() -> int:
             target_workflow=target_workflow,
             target_ref=target_ref,
             prev_radar_pids_override=mem_radar_pids,
+            last_full_stat_audit_ts_override=mem_last_full_stat_audit_ts,
         )
         if meta.get("radar_ok"):
             mem_radar_pids = set(meta.get("radar_active_pids") or [])
+        if meta.get("full_stat_audit_ran"):
+            mem_last_full_stat_audit_ts = int(meta.get("full_stat_audit_ts") or int(time.time()))
         last_ok_str = f"{meta['ok_accounts']}/{meta['total_accounts']}"
         radar_tag = f"Radar={len(meta.get('radar_active_pids') or [])}" if meta.get("radar_ok") else "Radar=OFF"
 
