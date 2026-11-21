@@ -1,6 +1,6 @@
 {
-  "last_checked_ts": 1795217407,
-  "last_dispatch_ts": 1795217407,
+  "last_checked_ts": 1795221620,
+  "last_dispatch_ts": 1795221620,
   "last_weekly_summary_iso_week": "",
   "pending_bg_followup_due_ts": 0,
   "pending_bg_followup_match_id": 0,
@@ -16,18 +16,19 @@
       "max_stat_lmd": 1795126263
     },
     "1088455": {
-      "max_completion_time": 1795216293,
-      "max_match_id": 92339909,
-      "max_stat_lmd": 1795216293
+      "max_completion_time": 1795220923,
+      "max_match_id": 92345157,
+      "max_stat_lmd": 1795220923
     },
     "1097608": {
-      "max_completion_time": 1794185896,
-      "max_match_id": 90835186
+      "max_completion_time": 1795220923,
+      "max_match_id": 92345157,
+      "max_stat_lmd": 1795220923
     },
     "110078": {
-      "max_completion_time": 1795216758,
-      "max_match_id": 92342340,
-      "max_stat_lmd": 1795216758
+      "max_completion_time": 1795219339,
+      "max_match_id": 92343409,
+      "max_stat_lmd": 1795219339
     },
     "1114404": {
       "max_completion_time": 1795213274,
@@ -53,9 +54,9 @@
       "max_match_id": 92172691
     },
     "13450": {
-      "max_completion_time": 1795216936,
-      "max_match_id": 92341337,
-      "max_stat_lmd": 1795216936
+      "max_completion_time": 1795220819,
+      "max_match_id": 92344588,
+      "max_stat_lmd": 1795220819
     },
     "1423426": {
       "max_completion_time": 1794080435,
@@ -143,9 +144,9 @@
       "max_stat_lmd": 1795119563
     },
     "5768": {
-      "max_completion_time": 1795213906,
-      "max_match_id": 92339486,
-      "max_stat_lmd": 1795213906
+      "max_completion_time": 1795221165,
+      "max_match_id": 92344745,
+      "max_stat_lmd": 1795221165
     },
     "58737": {
       "max_completion_time": 1794008026,
@@ -220,11 +221,13 @@
     }
   },
   "radar_coh3_pids": [
+    5768,
+    6557,
     13450,
-    32922,
     110078,
-    1088455
+    1088455,
+    1097608
   ],
-  "radar_last_sync_ts": 1795217034,
+  "radar_last_sync_ts": 1795221344,
   "schema_version": 2
 }
