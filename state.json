@@ -1,10 +1,10 @@
 {
-  "last_checked_ts": 1795308182,
-  "last_dispatch_ts": 1795308182,
+  "last_checked_ts": 1795310602,
+  "last_dispatch_ts": 1795310602,
   "last_full_stat_audit_ts": 0,
   "last_weekly_summary_iso_week": "",
-  "pending_bg_followup_due_ts": 1795308422,
-  "pending_bg_followup_match_id": 92480707,
+  "pending_bg_followup_due_ts": 0,
+  "pending_bg_followup_match_id": 0,
   "players": {
     "1005730": {
       "max_completion_time": 1795191165,
@@ -113,9 +113,9 @@
       "max_match_id": 91192067
     },
     "366826": {
-      "max_completion_time": 1795134779,
-      "max_match_id": 92228817,
-      "max_stat_lmd": 1795134779
+      "max_completion_time": 1795310479,
+      "max_match_id": 92483625,
+      "max_stat_lmd": 1795310479
     },
     "3895": {
       "max_completion_time": 1795305965,
@@ -132,9 +132,9 @@
       "max_stat_lmd": 1795183241
     },
     "55693": {
-      "max_completion_time": 1795227239,
-      "max_match_id": 92350716,
-      "max_stat_lmd": 1795227239
+      "max_completion_time": 1795310479,
+      "max_match_id": 92483625,
+      "max_stat_lmd": 1795310479
     },
     "557890": {
       "max_completion_time": 1794083736,
@@ -159,9 +159,9 @@
       "max_match_id": 90519052
     },
     "639157": {
-      "max_completion_time": 1795298479,
-      "max_match_id": 92470844,
-      "max_stat_lmd": 1795298479
+      "max_completion_time": 1795310479,
+      "max_match_id": 92483625,
+      "max_stat_lmd": 1795310479
     },
     "648514": {
       "max_completion_time": 1795056915,
@@ -186,9 +186,9 @@
       "max_match_id": 78881147
     },
     "79327": {
-      "max_completion_time": 1795308044,
-      "max_match_id": 92480707,
-      "max_stat_lmd": 1795308044
+      "max_completion_time": 1795310479,
+      "max_match_id": 92483625,
+      "max_stat_lmd": 1795310479
     },
     "81751": {
       "max_completion_time": 1795302618,
@@ -223,14 +223,10 @@
     }
   },
   "radar_coh3_pids": [
-    3895,
     6557,
-    13450,
-    19747,
     79327,
-    735940,
-    1088455
+    735940
   ],
-  "radar_last_sync_ts": 1795307922,
+  "radar_last_sync_ts": 1795310100,
   "schema_version": 2
 }
