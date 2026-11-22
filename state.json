@@ -1,10 +1,10 @@
 {
-  "last_checked_ts": 1795354621,
-  "last_dispatch_ts": 1795354621,
+  "last_checked_ts": 1795357937,
+  "last_dispatch_ts": 1795357937,
   "last_full_stat_audit_ts": 1795352521,
   "last_weekly_summary_iso_week": "",
-  "pending_bg_followup_due_ts": 1795354861,
-  "pending_bg_followup_match_id": 92554537,
+  "pending_bg_followup_due_ts": 1795358177,
+  "pending_bg_followup_match_id": 92559376,
   "players": {
     "1005730": {
       "max_completion_time": 1795329654,
@@ -57,9 +57,9 @@
       "max_stat_lmd": 1795095125
     },
     "13450": {
-      "max_completion_time": 1795306415,
-      "max_match_id": 92479235,
-      "max_stat_lmd": 1795306415
+      "max_completion_time": 1795357686,
+      "max_match_id": 92559376,
+      "max_stat_lmd": 1795357686
     },
     "1423426": {
       "max_completion_time": 1794080435,
@@ -102,9 +102,9 @@
       "max_stat_lmd": 1748181998
     },
     "31145": {
-      "max_completion_time": 1795305456,
-      "max_match_id": 92477707,
-      "max_stat_lmd": 1795305456
+      "max_completion_time": 1795355959,
+      "max_match_id": 92555322,
+      "max_stat_lmd": 1795355959
     },
     "32922": {
       "max_completion_time": 1794703560,
@@ -172,9 +172,9 @@
       "max_stat_lmd": 1794018675
     },
     "639157": {
-      "max_completion_time": 1795353051,
-      "max_match_id": 92549876,
-      "max_stat_lmd": 1795353051
+      "max_completion_time": 1795356409,
+      "max_match_id": 92557053,
+      "max_stat_lmd": 1795356409
     },
     "648514": {
       "max_completion_time": 1795056915,
@@ -243,10 +243,8 @@
     }
   },
   "radar_coh3_pids": [
-    31145,
-    639157,
-    900358
+    31145
   ],
-  "radar_last_sync_ts": 1795354572,
+  "radar_last_sync_ts": 1795357649,
   "schema_version": 2
 }
