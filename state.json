@@ -1,6 +1,6 @@
 {
-  "last_checked_ts": 1795383571,
-  "last_dispatch_ts": 1795383571,
+  "last_checked_ts": 1795387191,
+  "last_dispatch_ts": 1795387191,
   "last_full_stat_audit_ts": 1795364574,
   "last_weekly_summary_iso_week": "",
   "pending_bg_followup_due_ts": 0,
@@ -17,9 +17,9 @@
       "max_stat_lmd": 1795337569
     },
     "1088455": {
-      "max_completion_time": 1795383074,
-      "max_match_id": 92603074,
-      "max_stat_lmd": 1795383074
+      "max_completion_time": 1795386398,
+      "max_match_id": 92607019,
+      "max_stat_lmd": 1795386398
     },
     "1097608": {
       "max_completion_time": 1795380897,
@@ -47,9 +47,9 @@
       "max_stat_lmd": 1795213615
     },
     "1282592": {
-      "max_completion_time": 1795294220,
-      "max_match_id": 92464186,
-      "max_stat_lmd": 1795294220
+      "max_completion_time": 1795386149,
+      "max_match_id": 92607492,
+      "max_stat_lmd": 1795386149
     },
     "1333418": {
       "max_completion_time": 1795095125,
@@ -102,9 +102,9 @@
       "max_stat_lmd": 1748181998
     },
     "31145": {
-      "max_completion_time": 1795383074,
-      "max_match_id": 92603074,
-      "max_stat_lmd": 1795383074
+      "max_completion_time": 1795384606,
+      "max_match_id": 92605441,
+      "max_stat_lmd": 1795384606
     },
     "32922": {
       "max_completion_time": 1794703560,
@@ -122,9 +122,9 @@
       "max_stat_lmd": 1794450126
     },
     "366826": {
-      "max_completion_time": 1795383074,
-      "max_match_id": 92603074,
-      "max_stat_lmd": 1795383074
+      "max_completion_time": 1795384606,
+      "max_match_id": 92605441,
+      "max_stat_lmd": 1795384606
     },
     "3895": {
       "max_completion_time": 1795367335,
@@ -192,9 +192,9 @@
       "max_stat_lmd": 1794173117
     },
     "735940": {
-      "max_completion_time": 1795319906,
-      "max_match_id": 92494355,
-      "max_stat_lmd": 1795319906
+      "max_completion_time": 1795386792,
+      "max_match_id": 92608045,
+      "max_stat_lmd": 1795386792
     },
     "737235": {
       "max_completion_time": 1783802508,
@@ -243,14 +243,11 @@
     }
   },
   "radar_coh3_pids": [
-    13450,
-    31145,
-    366826,
     735940,
     991764,
-    1088455,
-    1097608
+    1097608,
+    1282592
   ],
-  "radar_last_sync_ts": 1795383527,
+  "radar_last_sync_ts": 1795387166,
   "schema_version": 2
 }
