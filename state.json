@@ -1,6 +1,6 @@
 {
-  "last_checked_ts": 1795391110,
-  "last_dispatch_ts": 1795391110,
+  "last_checked_ts": 1795394431,
+  "last_dispatch_ts": 1795394431,
   "last_full_stat_audit_ts": 1795364574,
   "last_weekly_summary_iso_week": "",
   "pending_bg_followup_due_ts": 0,
@@ -17,9 +17,9 @@
       "max_stat_lmd": 1795337569
     },
     "1088455": {
-      "max_completion_time": 1795389822,
-      "max_match_id": 92610661,
-      "max_stat_lmd": 1795389823
+      "max_completion_time": 1795393885,
+      "max_match_id": 92614194,
+      "max_stat_lmd": 1795393885
     },
     "1097608": {
       "max_completion_time": 1795380897,
@@ -27,9 +27,9 @@
       "max_stat_lmd": 1795380897
     },
     "110078": {
-      "max_completion_time": 1795390024,
-      "max_match_id": 92609920,
-      "max_stat_lmd": 1795390024
+      "max_completion_time": 1795393232,
+      "max_match_id": 92612970,
+      "max_stat_lmd": 1795393232
     },
     "1114404": {
       "max_completion_time": 1795378508,
@@ -47,9 +47,9 @@
       "max_stat_lmd": 1795213615
     },
     "1282592": {
-      "max_completion_time": 1795390561,
-      "max_match_id": 92611580,
-      "max_stat_lmd": 1795390561
+      "max_completion_time": 1795392584,
+      "max_match_id": 92612332,
+      "max_stat_lmd": 1795392584
     },
     "1333418": {
       "max_completion_time": 1795095125,
@@ -57,9 +57,9 @@
       "max_stat_lmd": 1795095125
     },
     "13450": {
-      "max_completion_time": 1795387955,
-      "max_match_id": 92609108,
-      "max_stat_lmd": 1795387955
+      "max_completion_time": 1795393241,
+      "max_match_id": 92612557,
+      "max_stat_lmd": 1795393241
     },
     "1423426": {
       "max_completion_time": 1794080435,
@@ -92,9 +92,9 @@
       "max_stat_lmd": 1794716006
     },
     "28937": {
-      "max_completion_time": 1795379209,
-      "max_match_id": 92598494,
-      "max_stat_lmd": 1795379209
+      "max_completion_time": 1795394007,
+      "max_match_id": 92613720,
+      "max_stat_lmd": 1795394007
     },
     "31061": {
       "max_completion_time": 1748181998,
@@ -102,9 +102,9 @@
       "max_stat_lmd": 1748181998
     },
     "31145": {
-      "max_completion_time": 1795384606,
-      "max_match_id": 92605441,
-      "max_stat_lmd": 1795384606
+      "max_completion_time": 1795393077,
+      "max_match_id": 92612700,
+      "max_stat_lmd": 1795393077
     },
     "32922": {
       "max_completion_time": 1794703560,
@@ -172,14 +172,14 @@
       "max_stat_lmd": 1794018675
     },
     "639157": {
-      "max_completion_time": 1795378551,
-      "max_match_id": 92597033,
-      "max_stat_lmd": 1795378551
+      "max_completion_time": 1795392366,
+      "max_match_id": 92612734,
+      "max_stat_lmd": 1795392366
     },
     "648514": {
-      "max_completion_time": 1795056915,
-      "max_match_id": 92124661,
-      "max_stat_lmd": 1795056915
+      "max_completion_time": 1795393885,
+      "max_match_id": 92614194,
+      "max_stat_lmd": 1795393885
     },
     "6557": {
       "max_completion_time": 1795321463,
@@ -207,9 +207,9 @@
       "max_stat_lmd": 1795313006
     },
     "81751": {
-      "max_completion_time": 1795379209,
-      "max_match_id": 92598494,
-      "max_stat_lmd": 1795379209
+      "max_completion_time": 1795394007,
+      "max_match_id": 92613720,
+      "max_stat_lmd": 1795394007
     },
     "84821": {
       "max_completion_time": 1783991339,
@@ -232,9 +232,9 @@
       "max_stat_lmd": 1778461734
     },
     "991764": {
-      "max_completion_time": 1795388392,
-      "max_match_id": 92609601,
-      "max_stat_lmd": 1795388392
+      "max_completion_time": 1795391746,
+      "max_match_id": 92611231,
+      "max_stat_lmd": 1795391746
     },
     "99722": {
       "max_completion_time": 1779742217,
@@ -243,13 +243,17 @@
     }
   },
   "radar_coh3_pids": [
+    13450,
+    26910,
+    28937,
+    31145,
+    81751,
     110078,
-    337051,
+    639157,
     648514,
-    991764,
     1088455,
     1282592
   ],
-  "radar_last_sync_ts": 1795390818,
+  "radar_last_sync_ts": 1795394186,
   "schema_version": 2
 }
