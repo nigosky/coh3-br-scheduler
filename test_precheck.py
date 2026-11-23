@@ -29,11 +29,11 @@ class TestSchedulerSharedRoster(unittest.TestCase):
         )
         by_pid = dict(precheck.FALLBACK_MONITORED_PROFILES)
         expected_smurfs = {
-            1333418: ("76561198698969876", "Charles Bronson (Chacineiro)"),
-            557890: ("76561199538846112", "gabe44arg (Gabe)"),
-            1423426: ("76561199482388323", "geladeira velha (arc)"),
-            1390350: ("76561198089278659", "TearsInTheRain (Chacineiro)"),
-            1076221: ("76561198815935562", "Lucielle (Colossus)"),
+            1333418: ("76561198698969876", "Charles Bronson (Smurf: Chacineiro)"),
+            557890: ("76561199538846112", "gabe44arg (Smurf: Gabe)"),
+            1423426: ("76561199482388323", "geladeira velha (Smurf: arc)"),
+            1390350: ("76561198089278659", "TearsInTheRain (Smurf: Chacineiro)"),
+            1076221: ("76561198815935562", "Lucielle (Smurf: Colossus)"),
         }
         for spid, (expected_sid, expected_alias) in expected_smurfs.items():
             self.assertEqual(precheck.FALLBACK_STEAM_ID_TO_PID.get(expected_sid), spid)
@@ -290,6 +290,49 @@ class TestSchedulerSharedRoster(unittest.TestCase):
                 self.assertIn("Auditoria de silencio (1h)", reason3)
                 self.assertIn("Chacineiro", reason3)
                 self.assertNotIn("Liquid", reason3)
+
+    def test_redact_secrets_and_bounded_dispatch_response(self) -> None:
+        fake_gh = "ghp_" + ("Z" * 36)
+        fake_pat = "github_pat_" + ("Y" * 32)
+        fake_wh = "https://discord.com/api/webhooks/123456789012345678/" + ("A" * 40)
+        leaked = (
+            f"Authorization: Bearer {fake_gh} TRACKER_DISPATCH_TOKEN=tok_secret_123 "
+            f"pat={fake_pat} wh={fake_wh} ?key=ABCDEF1234567890"
+        )
+        scrubbed = precheck.redact_secrets(leaked)
+        for secret in (fake_gh, fake_pat, "tok_secret_123", "123456789012345678", "ABCDEF1234567890"):
+            self.assertNotIn(secret, scrubbed)
+        self.assertIn("[AUTH_REDACTED]", scrubbed)
+        self.assertIn("[SECRET_REDACTED]", scrubbed)
+        self.assertIn("[GH_TOKEN_REDACTED]", scrubbed)
+        self.assertIn("[WEBHOOK_REDACTED]", scrubbed)
+        self.assertIn("[STEAM_KEY_REDACTED]", scrubbed)
+
+        read_sizes: list[int] = []
+
+        class _FakeDispatchResp:
+            def __enter__(self) -> _FakeDispatchResp:
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                return False
+
+            def getcode(self) -> int:
+                return 204
+
+            def read(self, n: int = -1) -> bytes:
+                read_sizes.append(n)
+                return b""
+
+        class _FakeOpener:
+            def open(self, req: object, timeout: int = 20) -> _FakeDispatchResp:
+                return _FakeDispatchResp()
+
+        with patch.object(precheck, "_get_opener", return_value=_FakeOpener()):
+            ok, code = precheck.dispatch_private_tracker("tok_test_valid")
+        self.assertTrue(ok)
+        self.assertEqual(code, 204)
+        self.assertEqual(read_sizes, [1024])
 
 
 if __name__ == "__main__":
