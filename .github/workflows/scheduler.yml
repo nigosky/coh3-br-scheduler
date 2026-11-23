@@ -39,7 +39,7 @@ jobs:
       actions: write
     steps:
       - name: Checkout seguro na branch ativa (SHA imutavel)
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           fetch-depth: 0
@@ -86,8 +86,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Bloqueia qualquer padrao de token GitHub/Discord/Steam/dispatch/chave privada em TODOS os arquivos rastreados
-          SECRET_PATTERN="(ptb\.|canary\.)?discord(app)?\.com/api/(v[0-9]+/)?webhooks/[0-9]+|STEAM_WEB_API_KEY=[A-Za-z0-9]{16,}|x-webapi-key[:=][[:space:]]*[A-Za-z0-9]{16,}|[?&]key=[A-Za-z0-9]{16,}|TRACKER_DISPATCH_TOKEN=[A-Za-z0-9_.-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+          # Bloqueia qualquer padrao de token GitHub/Discord/Steam/dispatch/Authorization/chave privada em TODOS os arquivos rastreados
+          SECRET_PATTERN="(ptb\.|canary\.)?discord(app)?\.com/api/(v[0-9]+/)?webhooks/[0-9]+|STEAM_WEB_API_KEY=[A-Za-z0-9]{16,}|x-webapi-key[:=][[:space:]]*[A-Za-z0-9]{16,}|[?&]key=[A-Za-z0-9]{16,}|TRACKER_DISPATCH_TOKEN=[A-Za-z0-9_.-]{16,}|Authorization:[[:space:]]*(Bearer|Basic|Token)[[:space:]]+[A-Za-z0-9._-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
           if git ls-files -z | xargs -0 grep -InEi "${SECRET_PATTERN}" 2>/dev/null; then
             echo "::error::Bloqueio de seguranca acionado: padrao de credencial detectado em arquivo rastreado!"
             exit 1
@@ -95,6 +95,11 @@ jobs:
 
           if [ -f "state.json" ]; then
             git add -- state.json
+          fi
+
+          if git diff --cached --name-only | grep -Ei "(^\.env|\.secret$)" >/dev/null 2>&1; then
+            echo "::error::Bloqueio de seguranca acionado: arquivo de segredo staged!"
+            exit 1
           fi
 
           if git diff --cached --quiet; then

@@ -63,10 +63,38 @@ SAFE_GH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 SAFE_GH_REF_RE = re.compile(r"^[A-Za-z0-9_./-]{1,128}$")
 STEAM_ID64_VALID_RE = re.compile(r"^7656119\d{10}$")
 
+WEBHOOK_REDACT_RE = re.compile(
+    r"https?://[^\s/\"'<>]+/api/(?:v\d+/)?webhooks/[^\s\"'<>]+",
+    re.IGNORECASE,
+)
+TOKEN_ENV_REDACT_RE = re.compile(
+    r"((?:TRACKER_DISPATCH_TOKEN|GITHUB_TOKEN|GH_TOKEN|DISCORD_(?:LOBBY_)?WEBHOOK_URL|STEAM_WEB_API_KEY)\s*=\s*)[^\s\"'<>]+",
+    re.IGNORECASE,
+)
+STEAM_API_KEY_QUERY_REDACT_RE = re.compile(r"([?&]key=)[^&\s\"'<>]+", re.IGNORECASE)
+GITHUB_TOKEN_REDACT_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
+AUTH_HEADER_REDACT_RE = re.compile(
+    r"(Authorization\s*:\s*(?:Bearer|Basic|Token)\s+)[^\s\"'<>]+",
+    re.IGNORECASE,
+)
+
+
+def redact_secrets(text: Any) -> str:
+    """Remove tokens GitHub/dispatch, cabeçalhos Authorization, Webhooks e chaves Steam de logs e outputs."""
+    raw = str(text or "")
+    if not raw:
+        return ""
+    scrubbed = WEBHOOK_REDACT_RE.sub("[WEBHOOK_REDACTED]", raw)
+    scrubbed = TOKEN_ENV_REDACT_RE.sub(r"\1[SECRET_REDACTED]", scrubbed)
+    scrubbed = STEAM_API_KEY_QUERY_REDACT_RE.sub(r"\1[STEAM_KEY_REDACTED]", scrubbed)
+    scrubbed = GITHUB_TOKEN_REDACT_RE.sub("[GH_TOKEN_REDACTED]", scrubbed)
+    return AUTH_HEADER_REDACT_RE.sub(r"\1[AUTH_REDACTED]", scrubbed)
+
+
 # Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível (43 contas)
 FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (79327, "Chacineiro"),
-    (1333418, "Charles Bronson (Chacineiro)"),
+    (1333418, "Charles Bronson (Smurf: Chacineiro)"),
     (991764, "SaNgar [BR]"),
     (1088455, "luiz_fmh"),
     (735940, "Jimmy Duelista"),
@@ -90,12 +118,12 @@ FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (1022333, "gaules"),
     (32922, "Showtaro"),
     (153969, "Cunha"),
-    (557890, "gabe44arg (Gabe)"),
+    (557890, "gabe44arg (Smurf: Gabe)"),
     (26910, "nigo_BR ᵀᴹ"),
     (6557, "Dragoness"),
     (1226910, "Lupus Alba"),
     (1005730, "arc"),
-    (1423426, "geladeira velha (arc)"),
+    (1423426, "geladeira velha (Smurf: arc)"),
     (31145, "vonMises"),
     (58737, "INFIEL"),
     (431802, "Conflict.BR"),
@@ -106,14 +134,14 @@ FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (737235, "meuqsaco"),
     (1097608, "Winter Animal"),
     (975688, "Kefbr"),
-    (1390350, "TearsInTheRain (Chacineiro)"),
-    (1076221, "Lucielle (Colossus)"),
+    (1390350, "TearsInTheRain (Smurf: Chacineiro)"),
+    (1076221, "Lucielle (Smurf: Colossus)"),
 )
 
 # Mapa fallback SteamID64 -> profile_id (permite consumir `last_steam_fast_sig[0]` do Radar sem usar chave Steam)
 FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561197963172584": 79327,    # Chacineiro
-    "76561198698969876": 1333418,  # Charles Bronson (Chacineiro)
+    "76561198698969876": 1333418,  # Charles Bronson (Smurf: Chacineiro)
     "76561198115923932": 991764,   # SaNgar [BR]
     "76561198108568598": 1088455,  # luiz_fmh
     "76561198034510845": 735940,   # Jimmy Duelista
@@ -137,12 +165,12 @@ FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561198264285149": 1022333,  # gaules
     "76561197986271242": 32922,    # Showtaro
     "76561198005412401": 153969,   # Cunha
-    "76561199538846112": 557890,   # gabe44arg (Gabe)
+    "76561199538846112": 557890,   # gabe44arg (Smurf: Gabe)
     "76561197963741792": 26910,    # nigo_BR ᵀᴹ
     "76561198135142137": 6557,     # Dragoness
     "76561198140782132": 1226910,  # Lupus Alba
     "76561199791811246": 1005730,  # arc
-    "76561199482388323": 1423426,  # geladeira velha (arc)
+    "76561199482388323": 1423426,  # geladeira velha (Smurf: arc)
     "76561197985268629": 31145,    # vonMises
     "76561197993922195": 58737,    # INFIEL
     "76561198000099422": 431802,   # Conflict.BR
@@ -153,8 +181,8 @@ FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561198026394732": 737235,   # meuqsaco
     "76561199498421192": 1097608,  # Winter Animal
     "76561197994245218": 975688,   # Kefbr
-    "76561198089278659": 1390350,  # TearsInTheRain (Chacineiro)
-    "76561198815935562": 1076221,  # Lucielle (Colossus)
+    "76561198089278659": 1390350,  # TearsInTheRain (Smurf: Chacineiro)
+    "76561198815935562": 1076221,  # Lucielle (Smurf: Colossus)
 }
 
 # Contas secundárias mescladas preservadas quando a conta principal está no players_roster.json remoto (vazio: todas independentes)
@@ -626,10 +654,15 @@ def dispatch_private_tracker(
         try:
             with _get_opener().open(req, timeout=20) as resp:
                 last_code = int(resp.getcode() or 0)
+                resp.read(1024)
                 if last_code == 204:
                     return True, 204
         except urllib.error.HTTPError as exc:
             last_code = int(exc.code or 0)
+            try:
+                exc.read(1024)
+            except Exception:
+                pass
         except Exception:
             last_code = 0
 
@@ -680,7 +713,7 @@ def write_github_outputs(outputs: dict[str, str]) -> None:
             clean_k = str(k).strip()
             if not clean_k or not re.fullmatch(r"[A-Za-z0-9_]+", clean_k):
                 continue
-            clean_v = str(v).replace("\r", " ").replace("\n", " ").strip()
+            clean_v = redact_secrets(str(v).replace("\r", " ").replace("\n", " ").strip())
             fh.write(f"{clean_k}={clean_v}\n")
 
 
