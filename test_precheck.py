@@ -20,8 +20,8 @@ class TestSchedulerSharedRoster(unittest.TestCase):
         precheck._LAST_FETCHED_STEAM_ID_TO_PID = {}
 
     def test_fallback_profiles_and_steam_map_stay_aligned(self) -> None:
-        self.assertEqual(len(precheck.FALLBACK_MONITORED_PROFILES), 47)
-        self.assertEqual(len(precheck.FALLBACK_STEAM_ID_TO_PID), 47)
+        self.assertEqual(len(precheck.FALLBACK_MONITORED_PROFILES), 42)
+        self.assertEqual(len(precheck.FALLBACK_STEAM_ID_TO_PID), 42)
         self.assertEqual(
             set(precheck.FALLBACK_STEAM_ID_TO_PID.values()),
             {pid for pid, _ in precheck.FALLBACK_MONITORED_PROFILES},
@@ -29,6 +29,8 @@ class TestSchedulerSharedRoster(unittest.TestCase):
         # Conta secundária do arc (#1423426) e smurf do Chacineiro (#1333418) presentes no fallback e mapa SteamID64
         self.assertEqual(precheck.FALLBACK_STEAM_ID_TO_PID.get("76561199482388323"), 1423426)
         self.assertEqual(precheck.FALLBACK_STEAM_ID_TO_PID.get("76561198698969876"), 1333418)
+        for moved_pid in (19747, 23250, 28937, 81751, 3895):
+            self.assertNotIn(moved_pid, precheck.MONITORED_PID_SET)
 
     def test_parse_shared_roster_profiles_reads_veteranos_only_and_tags_secondary(self) -> None:
         payload = {
@@ -110,12 +112,12 @@ class TestSchedulerSharedRoster(unittest.TestCase):
                     ([], [], []),
                 )
             ),
-            # fast[0] = Veteranos no CoH3 (inclui Razi, arc sec e Chacineiro smurf via Steam Web API),
+            # fast[0] = Veteranos no CoH3 (inclui vonMises, arc sec e Chacineiro smurf via Steam Web API),
             # fast[1] = Online/outros jogos (nigo_BR em Marvel Rivals — NÃO deve ser incluído!)
             "last_steam_fast_sig": repr(
                 (
                     [
-                        ("76561198080023560", False, False, False, "Razi"),
+                        ("76561197985268629", False, False, False, "vonMises"),
                         ("76561199482388323", False, False, False, "arc"),
                         ("76561198698969876", False, False, False, "Charles Bronson"),
                         ("76561199999999999", False, False, False, "DesconhecidoNaoMonitorado"),
@@ -128,7 +130,7 @@ class TestSchedulerSharedRoster(unittest.TestCase):
             ),
         }
         active = precheck._parse_radar_state_active_pids(state_payload)
-        self.assertEqual(active, {79327, 639157, 110078, 81751, 1423426, 1333418})
+        self.assertEqual(active, {79327, 639157, 110078, 31145, 1423426, 1333418})
         self.assertNotIn(26910, active)
         self.assertNotIn(735940, active)
 
