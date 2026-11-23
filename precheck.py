@@ -3,7 +3,7 @@
 Pré-checagem inteligente (stdlib-only, TLS 1.2+) com loop contínuo de 5 min para `nigosky/coh3-br-scheduler`.
 
 Consulta diretamente a API pública da Relic (`getRecentMatchHistoryByProfileId`) das contas Steam
-monitoradas (sincronizadas da base compartilhada `players_roster.json`, com fallback embutido de 47 contas,
+monitoradas (sincronizadas da base compartilhada `players_roster.json`, com fallback embutido de 42 contas,
 cobrindo tanto Automatch ranqueadas quanto partidas Customizadas!) a cada 5 minutos durante uma sessão
 autônoma de 60 minutos (12 ciclos) e dispara (`workflow_dispatch`) o repositório privado
 `nigosky/coh3-br-tracker` imediatamente assim que qualquer partida nova termina!
@@ -63,7 +63,7 @@ SAFE_GH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 SAFE_GH_REF_RE = re.compile(r"^[A-Za-z0-9_./-]{1,128}$")
 STEAM_ID64_VALID_RE = re.compile(r"^7656119\d{10}$")
 
-# Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível
+# Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível (42 contas)
 FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (79327, "Chacineiro"),
     (1333418, "Chacineiro (sec)"),
@@ -77,7 +77,6 @@ FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (691, "Vítor"),
     (5768, "The Dog"),
     (13450, "7 DIVISAO PHANTOM"),
-    (19747, "twitch.tv/luck22ai"),
     (944488, "gbytes™"),
     (21206, "hjax"),
     (509690, "Alekel"),
@@ -96,7 +95,6 @@ FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (26910, "nigo_BR ᵀᴹ"),
     (6557, "Dragoness"),
     (1226910, "Lupus Alba"),
-    (3895, "Liquid"),
     (1005730, "arc"),
     (1423426, "arc (sec)"),
     (31145, "vonMises"),
@@ -106,10 +104,7 @@ FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (84821, "TJBR"),
     (99722, "MonteiroBR"),
     (31061, "ACB"),
-    (81751, "Razi"),
-    (28937, "Mjr Bruno"),
     (737235, "meuqsaco"),
-    (23250, "Nargoth"),
     (1097608, "Winter Animal"),
     (975688, "Kefbr"),
 )
@@ -128,7 +123,6 @@ FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561198001604015": 691,      # Vítor
     "76561198205052385": 5768,     # The Dog
     "76561198284234077": 13450,    # 7 DIVISAO PHANTOM
-    "76561198058548575": 19747,    # twitch.tv/luck22ai
     "76561198063124280": 944488,   # gbytes™
     "76561198061434984": 21206,    # hjax
     "76561198053226112": 509690,   # Alekel
@@ -147,7 +141,6 @@ FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561197963741792": 26910,    # nigo_BR ᵀᴹ
     "76561198135142137": 6557,     # Dragoness
     "76561198140782132": 1226910,  # Lupus Alba
-    "76561198054318813": 3895,     # Liquid
     "76561199791811246": 1005730,  # arc
     "76561199482388323": 1423426,  # arc (sec)
     "76561197985268629": 31145,    # vonMises
@@ -157,10 +150,7 @@ FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561198076576055": 84821,    # TJBR
     "76561198021071716": 99722,    # MonteiroBR
     "76561198009056438": 31061,    # ACB
-    "76561198080023560": 81751,    # Razi
-    "76561198089948995": 28937,    # Mjr Bruno
     "76561198026394732": 737235,   # meuqsaco
-    "76561198028378060": 23250,    # Nargoth
     "76561199498421192": 1097608,  # Winter Animal
     "76561197994245218": 975688,   # Kefbr
 }
