@@ -127,6 +127,7 @@ jobs:
           RELAY_ENABLED_VAR: ${{ vars.SCHEDULER_AUTO_RELAY_ENABLED }}
           AUTO_RELAY_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.auto_relay }}
           EVENT_NAME: ${{ github.event_name }}
+          PRECHECK_OUTCOME: ${{ steps.precheck.outcome }}
         run: |
           set -euo pipefail
 
@@ -137,6 +138,11 @@ jobs:
           if [ "${EVENT_NAME}" = "workflow_dispatch" ] && [ "${AUTO_RELAY_INPUT:-true}" = "false" ]; then
             echo "Execucao unica solicitada (auto_relay=false); nao agendando proxima sessao."
             exit 0
+          fi
+
+          if [ "${PRECHECK_OUTCOME:-}" != "success" ]; then
+            echo "::warning::Pre-checagem encerrou com status '${PRECHECK_OUTCOME:-unknown}'; aguardando 120s antes do self-relay para evitar loop rapido de falhas."
+            sleep 120
           fi
 
           if ! [[ "${GITHUB_RUN_ID:-}" =~ ^[0-9]+$ ]]; then
