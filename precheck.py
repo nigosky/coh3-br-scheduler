@@ -63,10 +63,10 @@ SAFE_GH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 SAFE_GH_REF_RE = re.compile(r"^[A-Za-z0-9_./-]{1,128}$")
 STEAM_ID64_VALID_RE = re.compile(r"^7656119\d{10}$")
 
-# Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível (42 contas)
+# Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível (48 contas)
 FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (79327, "Chacineiro"),
-    (1333418, "Chacineiro (sec)"),
+    (1333418, "Charles Bronson (Chacineiro)"),
     (991764, "SaNgar [BR]"),
     (1088455, "luiz_fmh"),
     (735940, "Jimmy Duelista"),
@@ -91,12 +91,12 @@ FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (1022333, "gaules"),
     (32922, "Showtaro"),
     (153969, "Cunha"),
-    (557890, "Gabe (sec)"),
+    (557890, "gabe44arg (Gabe)"),
     (26910, "nigo_BR ᵀᴹ"),
     (6557, "Dragoness"),
     (1226910, "Lupus Alba"),
     (1005730, "arc"),
-    (1423426, "arc (sec)"),
+    (1423426, "geladeira velha (arc)"),
     (31145, "vonMises"),
     (58737, "INFIEL"),
     (431802, "Conflict.BR"),
@@ -107,12 +107,18 @@ FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (737235, "meuqsaco"),
     (1097608, "Winter Animal"),
     (975688, "Kefbr"),
+    (1297853, "Shadow (Alekel)"),
+    (1390350, "TearsInTheRain (Chacineiro)"),
+    (1297804, "Leite Moço (『V』SKOBADARK)"),
+    (1297821, "Smurf 1 (General Winter)"),
+    (1318162, "Smurf 2 (General Winter)"),
+    (1076221, "Lucielle (Colossus)"),
 )
 
 # Mapa fallback SteamID64 -> profile_id (permite consumir `last_steam_fast_sig[0]` do Radar sem usar chave Steam)
 FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561197963172584": 79327,    # Chacineiro
-    "76561198698969876": 1333418,  # Chacineiro (sec)
+    "76561198698969876": 1333418,  # Charles Bronson (Chacineiro)
     "76561198115923932": 991764,   # SaNgar [BR]
     "76561198108568598": 1088455,  # luiz_fmh
     "76561198034510845": 735940,   # Jimmy Duelista
@@ -137,12 +143,12 @@ FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561198264285149": 1022333,  # gaules
     "76561197986271242": 32922,    # Showtaro
     "76561198005412401": 153969,   # Cunha
-    "76561199538846112": 557890,   # Gabe (sec)
+    "76561199538846112": 557890,   # gabe44arg (Gabe)
     "76561197963741792": 26910,    # nigo_BR ᵀᴹ
     "76561198135142137": 6557,     # Dragoness
     "76561198140782132": 1226910,  # Lupus Alba
     "76561199791811246": 1005730,  # arc
-    "76561199482388323": 1423426,  # arc (sec)
+    "76561199482388323": 1423426,  # geladeira velha (arc)
     "76561197985268629": 31145,    # vonMises
     "76561197993922195": 58737,    # INFIEL
     "76561198000099422": 431802,   # Conflict.BR
@@ -153,12 +159,16 @@ FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561198026394732": 737235,   # meuqsaco
     "76561199498421192": 1097608,  # Winter Animal
     "76561197994245218": 975688,   # Kefbr
+    "76561198721980631": 1297853,  # Shadow (Alekel)
+    "76561198089278659": 1390350,  # TearsInTheRain (Chacineiro)
+    "76561198723667226": 1297804,  # Leite Moço (『V』SKOBADARK)
+    "76561198722284920": 1297821,  # Smurf 1 (General Winter)
+    "76561198708550887": 1318162,  # Smurf 2 (General Winter)
+    "76561198815935562": 1076221,  # Lucielle (Colossus)
 }
 
-# Contas secundárias mescladas preservadas quando a conta principal está no players_roster.json remoto
-LOCAL_MERGED_ACCOUNT_FALLBACKS: tuple[tuple[int, str, str, int], ...] = (
-    (1333418, "76561198698969876", "Chacineiro (sec)", 79327),
-)
+# Contas secundárias mescladas preservadas quando a conta principal está no players_roster.json remoto (vazio: todas independentes)
+LOCAL_MERGED_ACCOUNT_FALLBACKS: tuple[tuple[int, str, str, int], ...] = ()
 
 MONITORED_PROFILES: tuple[tuple[int, str], ...] = FALLBACK_MONITORED_PROFILES
 MONITORED_PID_SET: frozenset[int] = frozenset(pid for pid, _ in MONITORED_PROFILES)

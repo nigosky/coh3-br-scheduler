@@ -20,15 +20,28 @@ class TestSchedulerSharedRoster(unittest.TestCase):
         precheck._LAST_FETCHED_STEAM_ID_TO_PID = {}
 
     def test_fallback_profiles_and_steam_map_stay_aligned(self) -> None:
-        self.assertEqual(len(precheck.FALLBACK_MONITORED_PROFILES), 42)
-        self.assertEqual(len(precheck.FALLBACK_STEAM_ID_TO_PID), 42)
+        self.assertEqual(len(precheck.FALLBACK_MONITORED_PROFILES), 48)
+        self.assertEqual(len(precheck.FALLBACK_STEAM_ID_TO_PID), 48)
+        self.assertEqual(precheck.LOCAL_MERGED_ACCOUNT_FALLBACKS, ())
         self.assertEqual(
             set(precheck.FALLBACK_STEAM_ID_TO_PID.values()),
             {pid for pid, _ in precheck.FALLBACK_MONITORED_PROFILES},
         )
-        # Conta secundária do arc (#1423426) e smurf do Chacineiro (#1333418) presentes no fallback e mapa SteamID64
-        self.assertEqual(precheck.FALLBACK_STEAM_ID_TO_PID.get("76561199482388323"), 1423426)
-        self.assertEqual(precheck.FALLBACK_STEAM_ID_TO_PID.get("76561198698969876"), 1333418)
+        by_pid = dict(precheck.FALLBACK_MONITORED_PROFILES)
+        expected_smurfs = {
+            1333418: ("76561198698969876", "Charles Bronson (Chacineiro)"),
+            557890: ("76561199538846112", "gabe44arg (Gabe)"),
+            1423426: ("76561199482388323", "geladeira velha (arc)"),
+            1297853: ("76561198721980631", "Shadow (Alekel)"),
+            1390350: ("76561198089278659", "TearsInTheRain (Chacineiro)"),
+            1297804: ("76561198723667226", "Leite Moço (『V』SKOBADARK)"),
+            1297821: ("76561198722284920", "Smurf 1 (General Winter)"),
+            1318162: ("76561198708550887", "Smurf 2 (General Winter)"),
+            1076221: ("76561198815935562", "Lucielle (Colossus)"),
+        }
+        for spid, (expected_sid, expected_alias) in expected_smurfs.items():
+            self.assertEqual(precheck.FALLBACK_STEAM_ID_TO_PID.get(expected_sid), spid)
+            self.assertEqual(by_pid.get(spid), expected_alias)
         for moved_pid in (19747, 23250, 28937, 81751, 3895):
             self.assertNotIn(moved_pid, precheck.MONITORED_PID_SET)
 
@@ -84,12 +97,25 @@ class TestSchedulerSharedRoster(unittest.TestCase):
             self.assertEqual(precheck.MONITORED_PROFILES, ((101, "Alpha"), (202, "Beta")))
             self.assertEqual(precheck.MONITORED_PID_SET, frozenset({101, 202}))
 
-        # Quando Chacineiro principal (#79327) está no roster remoto sem a smurf #1333418, preserva a smurf automaticamente
+        # Sem LOCAL_MERGED_ACCOUNT_FALLBACKS padrão, reflete fielmente o roster remoto sem injetar contas legadas
         with patch.object(precheck, "fetch_shared_monitored_profiles", return_value=((79327, "Chacineiro"), (202, "Beta"))):
+            self.assertTrue(precheck.refresh_monitored_profiles())
+            self.assertEqual(precheck.MONITORED_PROFILES, ((79327, "Chacineiro"), (202, "Beta")))
+            self.assertEqual(precheck.MONITORED_PID_SET, frozenset({79327, 202}))
+
+        # Mecanismo genérico LOCAL_MERGED_ACCOUNT_FALLBACKS continua preservando fallback quando explicitamente configurado
+        with (
+            patch.object(
+                precheck,
+                "LOCAL_MERGED_ACCOUNT_FALLBACKS",
+                ((1333418, "76561198698969876", "Charles Bronson (Chacineiro)", 79327),),
+            ),
+            patch.object(precheck, "fetch_shared_monitored_profiles", return_value=((79327, "Chacineiro"), (202, "Beta"))),
+        ):
             self.assertTrue(precheck.refresh_monitored_profiles())
             self.assertEqual(
                 precheck.MONITORED_PROFILES,
-                ((79327, "Chacineiro"), (1333418, "Chacineiro (sec)"), (202, "Beta")),
+                ((79327, "Chacineiro"), (1333418, "Charles Bronson (Chacineiro)"), (202, "Beta")),
             )
             self.assertEqual(precheck.STEAM_ID_TO_PID.get("76561198698969876"), 1333418)
 
