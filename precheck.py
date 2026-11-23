@@ -63,7 +63,7 @@ SAFE_GH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 SAFE_GH_REF_RE = re.compile(r"^[A-Za-z0-9_./-]{1,128}$")
 STEAM_ID64_VALID_RE = re.compile(r"^7656119\d{10}$")
 
-# Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível (48 contas)
+# Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível (46 contas)
 FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (79327, "Chacineiro"),
     (1333418, "Charles Bronson (Chacineiro)"),
@@ -110,8 +110,6 @@ FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (1297853, "Shadow (Alekel)"),
     (1390350, "TearsInTheRain (Chacineiro)"),
     (1297804, "Leite Moço (『V』SKOBADARK)"),
-    (1297821, "Smurf 1 (General Winter)"),
-    (1318162, "Smurf 2 (General Winter)"),
     (1076221, "Lucielle (Colossus)"),
 )
 
@@ -162,8 +160,6 @@ FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561198721980631": 1297853,  # Shadow (Alekel)
     "76561198089278659": 1390350,  # TearsInTheRain (Chacineiro)
     "76561198723667226": 1297804,  # Leite Moço (『V』SKOBADARK)
-    "76561198722284920": 1297821,  # Smurf 1 (General Winter)
-    "76561198708550887": 1318162,  # Smurf 2 (General Winter)
     "76561198815935562": 1076221,  # Lucielle (Colossus)
 }
 
