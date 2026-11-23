@@ -1,7 +1,7 @@
 {
-  "last_checked_ts": 1795450487,
-  "last_dispatch_ts": 1795450487,
-  "last_full_stat_audit_ts": 1795447487,
+  "last_checked_ts": 1795455924,
+  "last_dispatch_ts": 1795455924,
+  "last_full_stat_audit_ts": 1795454124,
   "last_weekly_summary_iso_week": "2026-W48",
   "pending_bg_followup_due_ts": 0,
   "pending_bg_followup_match_id": 0,
@@ -71,30 +71,15 @@
       "max_match_id": 90802544,
       "max_stat_lmd": 1794162164
     },
-    "19747": {
-      "max_completion_time": 1795321463,
-      "max_match_id": 92494348,
-      "max_stat_lmd": 1795321463
-    },
     "21206": {
       "max_completion_time": 1793631282,
       "max_match_id": 90076796,
       "max_stat_lmd": 1793631283
     },
-    "23250": {
-      "max_completion_time": 1778035588,
-      "max_match_id": 71630560,
-      "max_stat_lmd": 1778035588
-    },
     "26910": {
       "max_completion_time": 1795400918,
       "max_match_id": 92618851,
       "max_stat_lmd": 1795400918
-    },
-    "28937": {
-      "max_completion_time": 1795395843,
-      "max_match_id": 92615082,
-      "max_stat_lmd": 1795395843
     },
     "31061": {
       "max_completion_time": 1748181998,
@@ -122,14 +107,9 @@
       "max_stat_lmd": 1794450126
     },
     "366826": {
-      "max_completion_time": 1795384606,
-      "max_match_id": 92605441,
-      "max_stat_lmd": 1795384606
-    },
-    "3895": {
-      "max_completion_time": 1795399503,
-      "max_match_id": 92618190,
-      "max_stat_lmd": 1795399503
+      "max_completion_time": 1795455487,
+      "max_match_id": 92690999,
+      "max_stat_lmd": 1795455487
     },
     "431802": {
       "max_completion_time": 1788390907,
@@ -206,11 +186,6 @@
       "max_match_id": 92483920,
       "max_stat_lmd": 1795313006
     },
-    "81751": {
-      "max_completion_time": 1795395843,
-      "max_match_id": 92615082,
-      "max_stat_lmd": 1795395843
-    },
     "84821": {
       "max_completion_time": 1783991339,
       "max_match_id": 79109597,
@@ -243,6 +218,6 @@
     }
   },
   "radar_coh3_pids": [],
-  "radar_last_sync_ts": 1795449973,
+  "radar_last_sync_ts": 1795455430,
   "schema_version": 2
 }
