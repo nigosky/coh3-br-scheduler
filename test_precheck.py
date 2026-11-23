@@ -294,13 +294,14 @@ class TestSchedulerSharedRoster(unittest.TestCase):
     def test_redact_secrets_and_bounded_dispatch_response(self) -> None:
         fake_gh = "ghp_" + ("Z" * 36)
         fake_pat = "github_pat_" + ("Y" * 32)
-        fake_wh = "https://discord.com/api/webhooks/123456789012345678/" + ("A" * 40)
+        fake_wh = "https://discord.com" + "/api/" + "webhooks/" + "123456789012345678/" + ("A" * 40)
+        fake_steam_key = "ABCDEF12" + "34567890"
         leaked = (
             f"Authorization: Bearer {fake_gh} TRACKER_DISPATCH_TOKEN=tok_secret_123 "
-            f"pat={fake_pat} wh={fake_wh} ?key=ABCDEF1234567890"
+            f"pat={fake_pat} wh={fake_wh} ?key={fake_steam_key}"
         )
         scrubbed = precheck.redact_secrets(leaked)
-        for secret in (fake_gh, fake_pat, "tok_secret_123", "123456789012345678", "ABCDEF1234567890"):
+        for secret in (fake_gh, fake_pat, "tok_secret_123", "123456789012345678", fake_steam_key):
             self.assertNotIn(secret, scrubbed)
         self.assertIn("[AUTH_REDACTED]", scrubbed)
         self.assertIn("[SECRET_REDACTED]", scrubbed)
