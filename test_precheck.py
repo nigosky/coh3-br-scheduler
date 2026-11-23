@@ -20,8 +20,8 @@ class TestSchedulerSharedRoster(unittest.TestCase):
         precheck._LAST_FETCHED_STEAM_ID_TO_PID = {}
 
     def test_fallback_profiles_and_steam_map_stay_aligned(self) -> None:
-        self.assertEqual(len(precheck.FALLBACK_MONITORED_PROFILES), 46)
-        self.assertEqual(len(precheck.FALLBACK_STEAM_ID_TO_PID), 46)
+        self.assertEqual(len(precheck.FALLBACK_MONITORED_PROFILES), 43)
+        self.assertEqual(len(precheck.FALLBACK_STEAM_ID_TO_PID), 43)
         self.assertEqual(precheck.LOCAL_MERGED_ACCOUNT_FALLBACKS, ())
         self.assertEqual(
             set(precheck.FALLBACK_STEAM_ID_TO_PID.values()),
@@ -32,15 +32,13 @@ class TestSchedulerSharedRoster(unittest.TestCase):
             1333418: ("76561198698969876", "Charles Bronson (Chacineiro)"),
             557890: ("76561199538846112", "gabe44arg (Gabe)"),
             1423426: ("76561199482388323", "geladeira velha (arc)"),
-            1297853: ("76561198721980631", "Shadow (Alekel)"),
             1390350: ("76561198089278659", "TearsInTheRain (Chacineiro)"),
-            1297804: ("76561198723667226", "Leite Moço (『V』SKOBADARK)"),
             1076221: ("76561198815935562", "Lucielle (Colossus)"),
         }
         for spid, (expected_sid, expected_alias) in expected_smurfs.items():
             self.assertEqual(precheck.FALLBACK_STEAM_ID_TO_PID.get(expected_sid), spid)
             self.assertEqual(by_pid.get(spid), expected_alias)
-        for moved_pid in (19747, 23250, 28937, 81751, 3895, 462597, 1297821, 1318162):
+        for moved_pid in (19747, 23250, 28937, 81751, 3895, 462597, 1297821, 1318162, 509690, 1297853, 844225, 1297804, 164152):
             self.assertNotIn(moved_pid, precheck.MONITORED_PID_SET)
 
     def test_parse_shared_roster_profiles_reads_veteranos_only_and_tags_secondary(self) -> None:

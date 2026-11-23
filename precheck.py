@@ -63,7 +63,7 @@ SAFE_GH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 SAFE_GH_REF_RE = re.compile(r"^[A-Za-z0-9_./-]{1,128}$")
 STEAM_ID64_VALID_RE = re.compile(r"^7656119\d{10}$")
 
-# Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível (46 contas)
+# Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível (43 contas)
 FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (79327, "Chacineiro"),
     (1333418, "Charles Bronson (Chacineiro)"),
@@ -79,7 +79,6 @@ FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (13450, "7 DIVISAO PHANTOM"),
     (944488, "gbytes™"),
     (21206, "hjax"),
-    (509690, "Alekel"),
     (1114404, "Vikitor"),
     (366826, "Lem22"),
     (1282592, "SapoBoi_BR"),
@@ -107,9 +106,7 @@ FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (737235, "meuqsaco"),
     (1097608, "Winter Animal"),
     (975688, "Kefbr"),
-    (1297853, "Shadow (Alekel)"),
     (1390350, "TearsInTheRain (Chacineiro)"),
-    (1297804, "Leite Moço (『V』SKOBADARK)"),
     (1076221, "Lucielle (Colossus)"),
 )
 
@@ -129,7 +126,6 @@ FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561198284234077": 13450,    # 7 DIVISAO PHANTOM
     "76561198063124280": 944488,   # gbytes™
     "76561198061434984": 21206,    # hjax
-    "76561198053226112": 509690,   # Alekel
     "76561198024118058": 1114404,  # Vikitor
     "76561198014985380": 366826,   # Lem22
     "76561198028644178": 1282592,  # SapoBoi_BR
@@ -157,9 +153,7 @@ FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561198026394732": 737235,   # meuqsaco
     "76561199498421192": 1097608,  # Winter Animal
     "76561197994245218": 975688,   # Kefbr
-    "76561198721980631": 1297853,  # Shadow (Alekel)
     "76561198089278659": 1390350,  # TearsInTheRain (Chacineiro)
-    "76561198723667226": 1297804,  # Leite Moço (『V』SKOBADARK)
     "76561198815935562": 1076221,  # Lucielle (Colossus)
 }
 
