@@ -1,20 +1,20 @@
 {
-  "last_checked_ts": 1795467094,
-  "last_dispatch_ts": 1795467094,
+  "last_checked_ts": 1795470707,
+  "last_dispatch_ts": 1795470707,
   "last_full_stat_audit_ts": 1795454124,
   "last_weekly_summary_iso_week": "2026-W48",
   "pending_bg_followup_due_ts": 0,
   "pending_bg_followup_match_id": 0,
   "players": {
     "1005730": {
-      "max_completion_time": 1795466134,
-      "max_match_id": 92705437,
-      "max_stat_lmd": 1795466134
+      "max_completion_time": 1795468054,
+      "max_match_id": 92706424,
+      "max_stat_lmd": 1795468054
     },
     "1022333": {
-      "max_completion_time": 1795466765,
-      "max_match_id": 92705778,
-      "max_stat_lmd": 1795466765
+      "max_completion_time": 1795468799,
+      "max_match_id": 92707447,
+      "max_stat_lmd": 1795468799
     },
     "1076221": {
       "max_completion_time": 1775008337,
@@ -115,9 +115,9 @@
       "max_stat_lmd": 1794450126
     },
     "366826": {
-      "max_completion_time": 1795463345,
-      "max_match_id": 92699920,
-      "max_stat_lmd": 1795463345
+      "max_completion_time": 1795470251,
+      "max_match_id": 92708854,
+      "max_stat_lmd": 1795470251
     },
     "431802": {
       "max_completion_time": 1788390907,
@@ -135,9 +135,9 @@
       "max_stat_lmd": 1794083736
     },
     "559962": {
-      "max_completion_time": 1795466134,
-      "max_match_id": 92705437,
-      "max_stat_lmd": 1795466134
+      "max_completion_time": 1795468054,
+      "max_match_id": 92706424,
+      "max_stat_lmd": 1795468054
     },
     "5768": {
       "max_completion_time": 1795329853,
@@ -185,9 +185,9 @@
       "max_stat_lmd": 1783802508
     },
     "79327": {
-      "max_completion_time": 1795465722,
-      "max_match_id": 92704541,
-      "max_stat_lmd": 1795465723
+      "max_completion_time": 1795469783,
+      "max_match_id": 92708122,
+      "max_stat_lmd": 1795469783
     },
     "84821": {
       "max_completion_time": 1783991339,
@@ -222,10 +222,9 @@
   },
   "radar_coh3_pids": [
     79327,
-    559962,
-    1005730,
+    366826,
     1022333
   ],
-  "radar_last_sync_ts": 1795466760,
+  "radar_last_sync_ts": 1795470120,
   "schema_version": 2
 }
