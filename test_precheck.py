@@ -18,6 +18,7 @@ class TestSchedulerSharedRoster(unittest.TestCase):
         precheck.MONITORED_PID_SET = frozenset(pid for pid, _ in precheck.FALLBACK_MONITORED_PROFILES)
         precheck.STEAM_ID_TO_PID = dict(precheck.FALLBACK_STEAM_ID_TO_PID)
         precheck._LAST_FETCHED_STEAM_ID_TO_PID = {}
+        precheck._clear_http_caches()
 
     def test_fallback_profiles_and_steam_map_stay_aligned(self) -> None:
         self.assertEqual(len(precheck.FALLBACK_MONITORED_PROFILES), 48)
@@ -970,13 +971,529 @@ class TestSchedulerSharedRoster(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, msg=f"SECRET_PATTERN nao bloqueou: {sample!r}")
 
         # Garante que os arquivos-fonte do repositorio nao disparam falso positivo no gate anti-vazamento
+        watchdog_path = repo_root / ".github" / "workflows" / "watchdog.yml"
         clean_proc = subprocess.run(
-            ["grep", "-InEi", pattern, str(repo_root / "precheck.py"), str(repo_root / "test_precheck.py"), str(wf_path)],
+            [
+                "grep",
+                "-InEi",
+                pattern,
+                str(repo_root / "precheck.py"),
+                str(repo_root / "test_precheck.py"),
+                str(wf_path),
+                str(watchdog_path),
+            ],
             text=True,
             capture_output=True,
             check=False,
         )
         self.assertEqual(clean_proc.returncode, 1, msg=f"Falso positivo no gate anti-vazamento:\n{clean_proc.stdout}")
+
+        # Valida endurecimento dos workflows (least privilege, sem credenciais persistidas, grep -l sem vazar linha)
+        self.assertIn("persist-credentials: false", wf_text)
+        self.assertIn("grep -IlEi", wf_text)
+        self.assertIn("--merge-state", wf_text)
+        self.assertIn("--max-session-sec", wf_text)
+        self.assertIn('.status == "pending"', wf_text)
+
+        wd_text = watchdog_path.read_text(encoding="utf-8")
+        self.assertIn("permissions: {}", wd_text)
+        self.assertIn("actions: write", wd_text)
+        self.assertNotIn("contents: write", wd_text)
+        self.assertNotIn("TRACKER_DISPATCH_TOKEN", wd_text)
+        self.assertNotIn("RANKING_DISPATCH_TOKEN", wd_text)
+        self.assertIn("SCHEDULER_AUTO_RELAY_ENABLED", wd_text)
+
+    def test_security_hardening_proxy_ast_url_alias_and_outputs(self) -> None:
+        import urllib.request
+
+        # 1) Opener ignora HTTPS_PROXY/HTTP_PROXY do ambiente (evita exfiltracao de Authorization via proxy)
+        prev_opener = getattr(precheck._TLS_LOCALS, "opener", None)
+        try:
+            with patch.dict(os.environ, {"HTTPS_PROXY": "http://127.0.0.1:9", "HTTP_PROXY": "http://127.0.0.1:9"}):
+                if hasattr(precheck._TLS_LOCALS, "opener"):
+                    delattr(precheck._TLS_LOCALS, "opener")
+                opener = precheck._get_opener()
+                active_proxies = [
+                    h.proxies
+                    for h in opener.handlers
+                    if isinstance(h, urllib.request.ProxyHandler) and h.proxies
+                ]
+                self.assertEqual(active_proxies, [])
+        finally:
+            if prev_opener is not None:
+                precheck._TLS_LOCALS.opener = prev_opener
+
+        # 2) URL validator bloqueia Unicode/non-ASCII e caracteres de controle percent-encoded
+        for bad_url in (
+            "https://coh3-api.reliclink.com/community/leaderboard/x%0ainjected",
+            "https://coh3-api.reliclink.com/community/leaderboard/x%00null",
+            "https://coh3-api.reliclink.com/community/leaderboard/café",
+        ):
+            with self.assertRaises(ValueError):
+                precheck._validate_outbound_https(bad_url, precheck.RELIC_HOST, path_prefix="/community/leaderboard/")
+
+        # 3) _read_bounded_json rejeita Content-Length acima do limite sem sequer ler o corpo
+        class _OversizedResp:
+            headers = {"Content-Length": str(precheck.MAX_RADAR_BYTES + 1)}
+
+            def read(self, n: int = -1) -> bytes:
+                raise AssertionError("Nao deveria ler corpo quando Content-Length excede limite!")
+
+        with self.assertRaises(ValueError):
+            precheck._read_bounded_json(_OversizedResp(), max_bytes=precheck.MAX_RADAR_BYTES)
+
+        # 4) _safe_literal_eval bloqueia nesting profundo (anti-DoS AST)
+        self.assertIsNone(precheck._safe_literal_eval("(" * 30 + "1" + ")" * 30))
+        self.assertEqual(precheck._safe_literal_eval("(1, [2, 3])"), (1, [2, 3]))
+
+        # 5) Sanitizacao de apelidos externos neutraliza injecao de comando Actions/HTML/Markdown preservando Unicode valido
+        self.assertEqual(
+            precheck._sanitize_alias("Evil\n::error::pwn <script>`x`</script>"),
+            "Evil :error:pwn scriptx/script",
+        )
+        self.assertEqual(precheck._sanitize_alias("[click](https://evil.com)"), "[click] (https://evil.com)")
+        self.assertEqual(precheck._sanitize_alias("SaNgar [BR]"), "SaNgar [BR]")
+        self.assertEqual(precheck._sanitize_alias("nigo_BR ᵀᴹ"), "nigo_BR ᵀᴹ")
+        self.assertEqual(precheck._sanitize_alias("Državljan H (Smurf: arc)"), "Državljan H (Smurf: arc)")
+
+        # 6) Redaction tambem mascara atribuicoes com ':' e write_github_outputs sanitiza + bloqueia symlink
+        fake_val = "secret_colon_" + ("7" * 16)
+        self.assertIn("[SECRET_REDACTED]", precheck.redact_secrets(f"RANKING_DISPATCH_TOKEN: {fake_val}"))
+        self.assertNotIn(fake_val, precheck.redact_secrets(f"RANKING_DISPATCH_TOKEN: {fake_val}"))
+
+        with tempfile.TemporaryDirectory() as td:
+            out_file = Path(td) / "gh_out.txt"
+            link_file = Path(td) / "gh_out_link.txt"
+            out_file.write_text("", encoding="utf-8")
+            os.symlink(out_file, link_file)
+
+            with patch.dict(os.environ, {"GITHUB_OUTPUT": str(link_file)}):
+                with self.assertRaises(RuntimeError):
+                    precheck.write_github_outputs({"summary_reason": "ok"})
+
+            with patch.dict(os.environ, {"GITHUB_OUTPUT": str(out_file)}):
+                precheck.write_github_outputs({"summary_reason": "ok\n::error::bad `cmd` <b>x</b>"})
+            written = out_file.read_text(encoding="utf-8")
+            self.assertEqual(written.count("\n"), 1)
+            self.assertNotIn("<b>", written)
+            self.assertNotIn("`", written)
+
+    def test_dormant_new_player_onboarding_and_relic_outage_circuit_breaker(self) -> None:
+        import json
+
+        now_ts = 1_795_536_000  # 2026-11-24 13:00 BRT
+        precheck.MONITORED_PROFILES = ((79327, "Chacineiro"), (918241, "Faint (Smurf: arc)"))
+        precheck.MONITORED_PID_SET = frozenset({79327, 918241})
+
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "last_dispatch_ts": now_ts - 600,
+                        "last_ranking_daily_date": "2026-11-24",
+                        "last_ranking_slot": "2026-11-24-12",
+                        "players": {"79327": {"max_match_id": 500, "max_completion_time": now_ts - 3600}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            # 1) Conta nova dormente (ultima partida ha 1 ano) NAO deve gerar falso positivo!
+            def _marker_dormant(pid: int) -> tuple[int, int, int, bool, int, int]:
+                if pid == 79327:
+                    return (79327, 500, now_ts - 3600, True, 500, now_ts - 3600)
+                return (918241, 32251239, now_ts - 365 * 86400, True, 32251239, now_ts - 365 * 86400)
+
+            with (
+                patch.object(precheck.time, "time", return_value=now_ts),
+                patch.object(precheck, "fetch_latest_player_marker", side_effect=_marker_dormant),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=(set(), now_ts, True)),
+            ):
+                should_disp, _, _, _ = precheck.evaluate_precheck(state_path=state_path, dry_run=True)
+            self.assertFalse(should_disp)
+
+            # 2) Conta nova com partida recente (<72h) DEVE disparar imediatamente!
+            def _marker_recent(pid: int) -> tuple[int, int, int, bool, int, int]:
+                if pid == 79327:
+                    return (79327, 500, now_ts - 3600, True, 500, now_ts - 3600)
+                return (918241, 92999999, now_ts - 300, True, 92999999, now_ts - 300)
+
+            with (
+                patch.object(precheck.time, "time", return_value=now_ts),
+                patch.object(precheck, "fetch_latest_player_marker", side_effect=_marker_recent),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=(set(), now_ts, True)),
+            ):
+                should_disp_recent, _, reason_recent, _ = precheck.evaluate_precheck(state_path=state_path, dry_run=True)
+            self.assertTrue(should_disp_recent)
+            self.assertIn("Faint (Smurf: arc)", reason_recent)
+
+            # 3) Circuit breaker durante queda total da Relic: ultimo disparo ha 10 min (<30m) -> suprime spam!
+            with (
+                patch.object(precheck.time, "time", return_value=now_ts),
+                patch.object(precheck, "fetch_latest_player_marker", side_effect=lambda p: (p, 0, 0, False, 0, 0)),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=(set(), now_ts, True)),
+            ):
+                should_outage_cd, _, reason_cd, meta_cd = precheck.evaluate_precheck(state_path=state_path, dry_run=True)
+            self.assertFalse(should_outage_cd)
+            self.assertTrue(meta_cd["outage_cooldown_active"])
+            self.assertIn("circuit breaker 30m", reason_cd)
+
+            # 4) Queda total da Relic apos 31 min -> fallback de seguranca dispara normalmente
+            with (
+                patch.object(precheck.time, "time", return_value=now_ts + 1300),
+                patch.object(precheck, "fetch_latest_player_marker", side_effect=lambda p: (p, 0, 0, False, 0, 0)),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=(set(), now_ts + 1300, True)),
+            ):
+                should_outage_fb, _, reason_fb, _ = precheck.evaluate_precheck(state_path=state_path, dry_run=True)
+            self.assertTrue(should_outage_fb)
+            self.assertIn("fallback de seguranca", reason_fb)
+
+    def test_radar_fallback_dedup_when_personalstat_succeeds(self) -> None:
+        import json
+
+        now_ts = 1_795_536_000
+        precheck.MONITORED_PROFILES = ((79327, "Chacineiro"), (559962, "Gabe"))
+        precheck.MONITORED_PID_SET = frozenset({79327, 559962})
+
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "last_dispatch_ts": now_ts - 600,
+                        "last_ranking_daily_date": "2026-11-24",
+                        "last_ranking_slot": "2026-11-24-12",
+                        "players": {
+                            "79327": {"max_match_id": 500, "max_completion_time": now_ts - 3600},
+                            "559962": {"max_match_id": 600, "max_completion_time": now_ts - 3600},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def _marker(pid: int) -> tuple[int, int, int, bool, int, int]:
+                if pid == 79327:
+                    return (79327, 0, 0, False, 0, 0)  # falha em getRecentMatchHistory
+                return (559962, 600, now_ts - 3600, True, 600, now_ts - 3600)
+
+            # Se getPersonalStat responde OK sem partida nova para 79327 -> NAO dispara fallback redundante
+            with (
+                patch.object(precheck.time, "time", return_value=now_ts),
+                patch.object(precheck, "fetch_latest_player_marker", side_effect=_marker),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=({79327}, now_ts, True)),
+                patch.object(precheck, "fetch_personal_stat_last_match", return_value={79327: now_ts - 3600}),
+            ):
+                should_disp, _, _, _ = precheck.evaluate_precheck(state_path=state_path, dry_run=True)
+            self.assertFalse(should_disp)
+
+            # Se getPersonalStat TAMBEM falha para 79327 -> aciona fallback de rechecagem
+            with (
+                patch.object(precheck.time, "time", return_value=now_ts),
+                patch.object(precheck, "fetch_latest_player_marker", side_effect=_marker),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=({79327}, now_ts, True)),
+                patch.object(precheck, "fetch_personal_stat_last_match", return_value={}),
+            ):
+                should_disp2, _, reason2, _ = precheck.evaluate_precheck(state_path=state_path, dry_run=True)
+            self.assertTrue(should_disp2)
+            self.assertIn("fallback p/ rechecagem Relic (Chacineiro)", reason2)
+
+    def test_etag_304_cache_and_monotonic_state_merge(self) -> None:
+        precheck._clear_http_caches()
+        seen_if_none_match: list[str] = []
+
+        class _Fake200Resp:
+            headers = {"ETag": '"etag-v1"'}
+
+            def __enter__(self) -> _Fake200Resp:
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                return False
+
+            def read(self, n: int = -1) -> bytes:
+                if not hasattr(self, "_done"):
+                    self._done = True
+                    return b'{"last_sync_ts": 1800000000, "last_alert_coh3_pids": [79327]}'
+                return b""
+
+        class _FakeEtagOpener:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def open(self, req: object, timeout: int = 8) -> object:
+                self.calls += 1
+                hdrs = getattr(req, "headers", {}) or {}
+                seen_if_none_match.append(str(hdrs.get("If-none-match", "")))
+                if self.calls == 1:
+                    return _Fake200Resp()
+                raise urllib.error.HTTPError(getattr(req, "full_url", ""), 304, "Not Modified", {}, None)
+
+        opener = _FakeEtagOpener()
+        with patch.object(precheck, "_get_opener", return_value=opener):
+            d1 = precheck._fetch_github_raw_json(precheck.RADAR_STATE_URL, expected_path=precheck.RADAR_STATE_PATH)
+            d2 = precheck._fetch_github_raw_json(precheck.RADAR_STATE_URL, expected_path=precheck.RADAR_STATE_PATH)
+
+        self.assertEqual(d1, {"last_sync_ts": 1800000000, "last_alert_coh3_pids": [79327]})
+        self.assertEqual(d2, d1)
+        self.assertEqual(seen_if_none_match, ["", '"etag-v1"'])
+        precheck._clear_http_caches()
+
+        # Merge monotonico preserva o melhor de remote + local sem nunca regredir marcadores ou partidas
+        remote = {
+            "schema_version": 2,
+            "last_checked_ts": 2000,
+            "last_dispatch_ts": 1900,
+            "last_full_stat_audit_ts": 1800,
+            "last_weekly_summary_iso_week": "2026-W48",
+            "last_ranking_daily_date": "2026-11-24",
+            "last_ranking_slot": "2026-11-24-12",
+            "last_ranking_bg_slot": "2026-W47",
+            "pending_bg_followup_due_ts": 0,
+            "pending_bg_followup_match_id": 0,
+            "pending_bg_followup_wave": 0,
+            "radar_coh3_pids": [79327],
+            "radar_last_sync_ts": 1950,
+            "players": {
+                "79327": {"max_match_id": 100, "max_completion_time": 1500, "max_stat_lmd": 1550},
+                "559962": {"max_match_id": 900, "max_completion_time": 1850},
+            },
+        }
+        local = {
+            "schema_version": 2,
+            "last_checked_ts": 2100,
+            "last_dispatch_ts": 2050,
+            "last_full_stat_audit_ts": 1700,
+            "last_weekly_summary_iso_week": "2026-W47",
+            "last_ranking_daily_date": "2026-11-24",
+            "last_ranking_slot": "2026-11-24-00",
+            "last_ranking_bg_slot": "2026-W48",
+            "pending_bg_followup_due_ts": 2300,
+            "pending_bg_followup_match_id": 105,
+            "pending_bg_followup_wave": 1,
+            "radar_coh3_pids": [559962],
+            "radar_last_sync_ts": 1900,
+            "players": {
+                "79327": {"max_match_id": 105, "max_completion_time": 2040},
+            },
+        }
+        merged = precheck.merge_states_monotonic(remote, local)
+        self.assertEqual(merged["last_checked_ts"], 2100)
+        self.assertEqual(merged["last_dispatch_ts"], 2050)
+        self.assertEqual(merged["last_full_stat_audit_ts"], 1800)
+        self.assertEqual(merged["last_weekly_summary_iso_week"], "2026-W48")
+        self.assertEqual(merged["last_ranking_daily_date"], "2026-11-24")
+        self.assertEqual(merged["last_ranking_slot"], "2026-11-24-12")
+        self.assertEqual(merged["last_ranking_bg_slot"], "2026-W48")
+        self.assertEqual(merged["pending_bg_followup_match_id"], 105)
+        self.assertEqual(merged["pending_bg_followup_wave"], 1)
+        self.assertEqual(merged["radar_coh3_pids"], [79327])  # remote tinha radar_last_sync_ts mais recente (1950 > 1900)
+        self.assertEqual(merged["players"]["79327"]["max_match_id"], 105)
+        self.assertEqual(merged["players"]["79327"]["max_completion_time"], 2040)
+        self.assertEqual(merged["players"]["79327"]["max_stat_lmd"], 2040)
+        self.assertEqual(merged["players"]["559962"]["max_match_id"], 900)
+
+    def test_keepalive_https_pool_reuse_discard_post_and_reconnect(self) -> None:
+        import http.client
+        import io
+        import urllib.request
+        from email.message import Message
+
+        precheck._clear_http_caches()
+        created_conns: list[_FakeHTTPSConn] = []
+        plan: list[tuple[int, bytes, bool, Exception | None]] = []
+
+        class _FakeHTTPResp:
+            def __init__(self, status: int, body: bytes, will_close: bool = False) -> None:
+                self.status = status
+                self.reason = "OK" if status == 200 else "ERR"
+                self.will_close = will_close
+                self.headers = Message()
+                self._buf = io.BytesIO(body)
+                self._closed = False
+
+            def read(self, amt: int | None = None) -> bytes:
+                data = self._buf.read() if amt is None else self._buf.read(amt)
+                if not data or amt is None:
+                    self._closed = True
+                return data
+
+            def readline(self, limit: int = -1) -> bytes:
+                return self._buf.readline(limit)
+
+            def isclosed(self) -> bool:
+                return self._closed
+
+            def close(self) -> None:
+                self._closed = True
+
+        class _FakeSock:
+            def settimeout(self, timeout: float) -> None:
+                self.timeout = timeout
+
+        class _FakeHTTPSConn:
+            def __init__(self, host: str, port: int, timeout: float = 15, context: object = None) -> None:
+                self.host = host
+                self.port = port
+                self.timeout = timeout
+                self.sock: object = _FakeSock()
+                self.closed = False
+                self.requests: list[tuple[str, str, dict[str, str]]] = []
+                created_conns.append(self)
+
+            def request(self, method: str, target: str, body: object = None, headers: dict[str, str] | None = None) -> None:
+                self.requests.append((method, target, dict(headers or {})))
+
+            def getresponse(self) -> _FakeHTTPResp:
+                status, body, will_close, exc = plan.pop(0)
+                if exc is not None:
+                    raise exc
+                return _FakeHTTPResp(status=status, body=body, will_close=will_close)
+
+            def close(self) -> None:
+                self.closed = True
+                self.sock = None
+
+        prev_opener = getattr(precheck._TLS_LOCALS, "opener", None)
+        try:
+            if hasattr(precheck._TLS_LOCALS, "opener"):
+                delattr(precheck._TLS_LOCALS, "opener")
+            opener = precheck._get_opener()
+
+            with patch.object(http.client, "HTTPSConnection", _FakeHTTPSConn):
+                # 1) Dois GET 200 completos no mesmo host reutilizam a MESMA conexao TLS (1 conexao p/ 2 requests)
+                plan.extend([(200, b'{"n":1}', False, None), (200, b'{"n":2}', False, None)])
+                req1 = urllib.request.Request("https://coh3-api.reliclink.com/community/leaderboard/a", method="GET")
+                with opener.open(req1, timeout=10) as r1:
+                    self.assertEqual(precheck._read_bounded_json(r1), {"n": 1})
+                req2 = urllib.request.Request("https://coh3-api.reliclink.com/community/leaderboard/b", method="GET")
+                with opener.open(req2, timeout=10) as r2:
+                    self.assertEqual(precheck._read_bounded_json(r2), {"n": 2})
+                self.assertEqual(len(created_conns), 1)
+                self.assertEqual(len(created_conns[0].requests), 2)
+                self.assertEqual(created_conns[0].requests[0][2]["Connection"], "keep-alive")
+
+                # 2) Conexao reaproveitada que sofre RemoteDisconnected reconecta automaticamente 1x sem erro!
+                plan.extend(
+                    [
+                        (200, b"", False, http.client.RemoteDisconnected("peer closed")),
+                        (200, b'{"n":3}', False, None),
+                    ]
+                )
+                req3 = urllib.request.Request("https://coh3-api.reliclink.com/community/leaderboard/c", method="GET")
+                with opener.open(req3, timeout=10) as r3:
+                    self.assertEqual(precheck._read_bounded_json(r3), {"n": 3})
+                self.assertEqual(len(created_conns), 2)
+                self.assertTrue(created_conns[0].closed)
+                self.assertFalse(created_conns[1].closed)
+
+                # 3) Leitura parcial/abortada descarta e fecha a conexao (nunca devolve socket sujo ao pool)
+                plan.append((200, b'{"big":true}', False, None))
+                req4 = urllib.request.Request("https://coh3-api.reliclink.com/community/leaderboard/d", method="GET")
+                with opener.open(req4, timeout=10) as r4:
+                    _ = r4.read(2)  # aborta antes de EOF
+                self.assertTrue(created_conns[1].closed)
+
+                # 4) POST nunca reutiliza pool e envia Connection: close
+                plan.append((204, b"", False, None))
+                req_post = urllib.request.Request(
+                    "https://api.github.com/repos/nigosky/coh3-br-tracker/actions/workflows/coh3_monitor.yml/dispatches",
+                    data=b'{"ref":"main"}',
+                    method="POST",
+                )
+                with opener.open(req_post, timeout=10) as r_post:
+                    self.assertEqual(r_post.getcode(), 204)
+                self.assertEqual(len(created_conns), 3)
+                self.assertEqual(created_conns[2].requests[0][2]["Connection"], "close")
+                self.assertTrue(created_conns[2].closed)
+
+                # 5) Erro HTTP (ex: 304/403) fecha o socket imediatamente e propaga HTTPError
+                plan.append((304, b"", False, None))
+                req_304 = urllib.request.Request("https://raw.githubusercontent.com/nigosky/coh3-br-lobby-radar/main/state.json")
+                with self.assertRaises(urllib.error.HTTPError) as ctx_err:
+                    opener.open(req_304, timeout=10)
+                self.assertEqual(ctx_err.exception.code, 304)
+                self.assertTrue(created_conns[3].closed)
+
+                # 6) close_keepalive_pool fecha conexoes ociosas remanescentes
+                plan.append((200, b'{"n":5}', False, None))
+                with opener.open(req1, timeout=10) as r5:
+                    self.assertEqual(precheck._read_bounded_json(r5), {"n": 5})
+                self.assertFalse(created_conns[4].closed)
+                precheck.close_keepalive_pool()
+                self.assertTrue(created_conns[4].closed)
+        finally:
+            precheck._clear_http_caches()
+            if prev_opener is not None:
+                precheck._TLS_LOCALS.opener = prev_opener
+
+    def test_cli_merge_state_end_to_end_and_symlink_rejection(self) -> None:
+        import json
+        import shutil
+        import subprocess
+        import sys
+
+        src_script = Path(__file__).resolve().parent / "precheck.py"
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            tmp_script = td_path / "precheck.py"
+            shutil.copy2(src_script, tmp_script)
+            remote_state_file = td_path / "state.json"
+            local_snap_file = td_path / "local_snap.json"
+
+            remote_state_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "last_checked_ts": 1000,
+                        "last_dispatch_ts": 900,
+                        "last_ranking_daily_date": "2026-11-24",
+                        "last_ranking_slot": "2026-11-24-12",
+                        "players": {"79327": {"max_match_id": 200, "max_completion_time": 800}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            local_snap_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "last_checked_ts": 1100,
+                        "last_dispatch_ts": 1050,
+                        "last_ranking_daily_date": "2026-11-24",
+                        "last_ranking_slot": "2026-11-24-00",
+                        "last_ranking_bg_slot": "2026-W48",
+                        "players": {"79327": {"max_match_id": 205, "max_completion_time": 1040}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            ok_proc = subprocess.run(
+                [sys.executable, str(tmp_script), "--merge-state", str(local_snap_file)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(ok_proc.returncode, 0, msg=ok_proc.stderr + ok_proc.stdout)
+            merged = json.loads(remote_state_file.read_text(encoding="utf-8"))
+            self.assertEqual(merged["last_ranking_slot"], "2026-11-24-12")
+            self.assertEqual(merged["last_ranking_bg_slot"], "2026-W48")
+            self.assertEqual(merged["players"]["79327"]["max_match_id"], 205)
+
+            # Symlink como arquivo de entrada para --merge-state deve ser bloqueado (returncode != 0)
+            link_snap = td_path / "link_snap.json"
+            os.symlink(local_snap_file, link_snap)
+            bad_proc = subprocess.run(
+                [sys.executable, str(tmp_script), "--merge-state", str(link_snap)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(bad_proc.returncode, 0)
 
 
 if __name__ == "__main__":

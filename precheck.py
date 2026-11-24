@@ -23,11 +23,14 @@ from __future__ import annotations
 import argparse
 import ast
 import concurrent.futures
+import copy
 import gzip
+import http.client
 import io
 import json
 import os
 import re
+import signal
 import ssl
 import sys
 import tempfile
@@ -36,11 +39,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import urllib.response
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-USER_AGENT = "CoH3-BR-SmartScheduler/2.5"
+USER_AGENT = "CoH3-BR-SmartScheduler/2.6"
 RELIC_HOST = "coh3-api.reliclink.com"
 GITHUB_API_HOST = "api.github.com"
 RADAR_HOST = "raw.githubusercontent.com"
@@ -58,12 +62,15 @@ RANKING_BG_WORKFLOW = "campeoes_battlegroups.yml"
 RANKING_UNIFIED_INPUTS: dict[str, Any] = {"force_update": False}
 MAX_HTTP_BYTES = 5 * 1024 * 1024  # 5 MB limite estrito anti-Gzip-bomb
 MAX_RADAR_BYTES = 256 * 1024  # 256 KB limite estrito para state.json e players_roster.json
+MAX_AST_NESTING_DEPTH = 16  # Limite estrito anti-DoS para ast.literal_eval em payloads externos
 RADAR_MAX_AGE_SEC = 7200  # Ignora estado do Radar se estiver há >2h sem sincronizar
 BRT_TZ = timezone(timedelta(hours=-3))
 HEARTBEAT_INTERVAL_SEC = 3 * 3600  # Garante 1 disparo de segurança a cada 3h (auditoria profunda, limpeza 72h, Open Data)
+RELIC_OUTAGE_FALLBACK_COOLDOWN_SEC = 1800  # Circuit breaker: durante queda total da Relic, limita fallback a 1x/30 min
 QUIET_PERSONAL_STAT_AUDIT_SEC = 3600  # Após 1h sem partidas, varre getPersonalStat em 100% do elenco a cada 1h
 QUIET_STAT_TOLERANCE_SEC = 60  # Margem segura acima do drift normal (+1s) do lastmatchdate da Relic
-QUIET_STAT_RECENT_WINDOW_SEC = 72 * 3600  # Considera apenas partidas recentes (<=72h) na auditoria silenciosa
+QUIET_STAT_RECENT_WINDOW_SEC = 72 * 3600  # Considera apenas partidas recentes (<=72h) na auditoria silenciosa e onboarding
+DEFAULT_MAX_SESSION_SEC = 3660  # Limite seguro (<70 min timeout do Actions) p/ garantir persistência + Self-Relay
 AUTOMATCH_TYPE_IDS: frozenset[int] = frozenset({1, 2, 3, 4, 20, 21, 22, 23})  # 1v1..4v4 Automatch CoH3
 BG_ELIGIBLE_TYPE_IDS: frozenset[int] = AUTOMATCH_TYPE_IDS | frozenset({0})  # Automatch + Custom (mt=0); exclui Co-Op vs IA
 BG_FOLLOWUP_FRESH_MATCH_SEC = 600  # Partida Automatch/Custom encerrada há <10 min pode ainda estar sendo parseada no cohdb.com
@@ -72,17 +79,19 @@ BG_FOLLOWUP_WAVE2_DELAY_SEC = 1500  # Onda 2: segunda confirmação ~25-30 min a
 BG_FOLLOWUP_TTL_SEC = 3600  # Descarta agendamento se ficar obsoleto (>60 min)
 
 URL_FORBIDDEN_CHARS_RE = re.compile(r"[\x00-\x20\x7f]")
+URL_ENCODED_CTRL_RE = re.compile(r"%0[0-9a-f]|%1[0-9a-f]|%7f", re.IGNORECASE)
 URL_PATH_TRAVERSAL_RE = re.compile(r"(?:^|/)\.\.(?:/|$)|%2e%2e|%5c|\\", re.IGNORECASE)
 SAFE_GH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 SAFE_GH_REF_RE = re.compile(r"^[A-Za-z0-9_./-]{1,128}$")
 STEAM_ID64_VALID_RE = re.compile(r"^7656119\d{10}$")
+CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]+")
 
 WEBHOOK_REDACT_RE = re.compile(
     r"https?://[^\s/\"'<>]+/api/(?:v\d+/)?webhooks/[^\s\"'<>]+",
     re.IGNORECASE,
 )
 TOKEN_ENV_REDACT_RE = re.compile(
-    r"((?:TRACKER_DISPATCH_TOKEN|RANKING_DISPATCH_TOKEN|GITHUB_TOKEN|GH_TOKEN|DISCORD_(?:LOBBY_)?WEBHOOK_URL|STEAM_WEB_API_KEY)\s*=\s*)[^\s\"'<>]+",
+    r"((?:TRACKER_DISPATCH_TOKEN|RANKING_DISPATCH_TOKEN|GITHUB_TOKEN|GH_TOKEN|DISCORD_(?:LOBBY_)?WEBHOOK_URL|STEAM_WEB_API_KEY)\s*[=:]\s*[\"']?)[^\s\"'<>]+",
     re.IGNORECASE,
 )
 STEAM_API_KEY_QUERY_REDACT_RE = re.compile(r"([?&]key=)[^&\s\"'<>]+", re.IGNORECASE)
@@ -103,6 +112,26 @@ def redact_secrets(text: Any) -> str:
     scrubbed = STEAM_API_KEY_QUERY_REDACT_RE.sub(r"\1[STEAM_KEY_REDACTED]", scrubbed)
     scrubbed = GITHUB_TOKEN_REDACT_RE.sub("[GH_TOKEN_REDACTED]", scrubbed)
     return AUTH_HEADER_REDACT_RE.sub(r"\1[AUTH_REDACTED]", scrubbed)
+
+
+def _sanitize_alias(raw: Any, fallback: str = "Player") -> str:
+    """Sanitiza apelidos externos contra injeção de comandos Actions (`::`), controle, newlines, links Markdown ou HTML."""
+    text = CONTROL_CHARS_RE.sub(" ", str(raw or ""))
+    text = text.replace("::", ":").replace("<", "").replace(">", "").replace("`", "").replace("](", "] (")
+    text = " ".join(text.split()).strip()[:40]
+    return text or fallback
+
+
+def _sanitize_log_line(text: Any) -> str:
+    """Garante saída em linha única e sem segredos, bloqueando injeção de comandos GitHub Actions por quebra de linha."""
+    one_line = CONTROL_CHARS_RE.sub(" ", str(text or "")).strip()
+    return redact_secrets(one_line)
+
+
+def _format_sample(items: list[str], limit: int = 4) -> str:
+    sample = ", ".join(items[:limit])
+    extra = f" +{len(items) - limit}" if len(items) > limit else ""
+    return f"{sample}{extra}"
 
 
 def resolve_ranking_dispatch_token(ranking_token: str = "", tracker_token: str = "") -> str:
@@ -141,7 +170,7 @@ def get_ranking_bg_slot(now_brt: datetime) -> str:
     return ""
 
 
-# Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível (46 contas)
+# Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível (48 contas)
 FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (79327, "Chacineiro"),
     (1333418, "Charles Bronson (Smurf: Chacineiro)"),
@@ -253,7 +282,262 @@ MONITORED_PID_SET: frozenset[int] = frozenset(pid for pid, _ in MONITORED_PROFIL
 STEAM_ID_TO_PID: dict[str, int] = dict(FALLBACK_STEAM_ID_TO_PID)
 _LAST_FETCHED_STEAM_ID_TO_PID: dict[str, int] = {}
 
+HTTPS_KEEPALIVE_IDLE_SEC = 30.0
+HTTPS_KEEPALIVE_MAX_PER_HOST = 8
+
 _TLS_LOCALS = threading.local()
+_RAW_JSON_CACHE_LOCK = threading.Lock()
+_RAW_JSON_ETAG_CACHE: dict[str, tuple[str, dict[str, Any]]] = {}
+_KA_POOL_LOCK = threading.Lock()
+_KA_IDLE_CONNS: dict[tuple[str, int], list[tuple[http.client.HTTPSConnection, float]]] = {}
+
+
+def close_keepalive_pool() -> None:
+    """Fecha e descarta todas as conexões HTTPS ociosas do pool Keep-Alive (evita sockets pendurados entre ciclos)."""
+    with _KA_POOL_LOCK:
+        buckets = list(_KA_IDLE_CONNS.values())
+        _KA_IDLE_CONNS.clear()
+    for items in buckets:
+        for conn, _ in items:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _clear_http_caches() -> None:
+    """Limpa caches HTTP em memória e fecha conexões ociosas do pool Keep-Alive."""
+    with _RAW_JSON_CACHE_LOCK:
+        _RAW_JSON_ETAG_CACHE.clear()
+    close_keepalive_pool()
+
+
+def _acquire_keepalive_conn(
+    host: str,
+    port: int,
+    timeout: float,
+    context: ssl.SSLContext,
+    can_pool: bool,
+) -> tuple[http.client.HTTPSConnection, bool]:
+    key = (host.lower(), int(port))
+    if can_pool:
+        now = time.monotonic()
+        stale: list[http.client.HTTPSConnection] = []
+        chosen: http.client.HTTPSConnection | None = None
+        with _KA_POOL_LOCK:
+            bucket = _KA_IDLE_CONNS.get(key)
+            while bucket:
+                conn, last_used = bucket.pop()
+                if (now - last_used) <= HTTPS_KEEPALIVE_IDLE_SEC and getattr(conn, "sock", None) is not None:
+                    chosen = conn
+                    break
+                stale.append(conn)
+            if bucket is not None and not bucket:
+                _KA_IDLE_CONNS.pop(key, None)
+        for old in stale:
+            try:
+                old.close()
+            except Exception:
+                pass
+        if chosen is not None:
+            try:
+                chosen.timeout = timeout
+                if chosen.sock is not None:
+                    chosen.sock.settimeout(timeout)
+            except Exception:
+                pass
+            return chosen, True
+    return http.client.HTTPSConnection(host, int(port), timeout=timeout, context=context), False
+
+
+def _release_keepalive_conn(key: tuple[str, int], conn: http.client.HTTPSConnection) -> None:
+    if getattr(conn, "sock", None) is None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return
+    overflow = False
+    with _KA_POOL_LOCK:
+        bucket = _KA_IDLE_CONNS.setdefault(key, [])
+        if len(bucket) < HTTPS_KEEPALIVE_MAX_PER_HOST:
+            bucket.append((conn, time.monotonic()))
+        else:
+            overflow = True
+    if overflow:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+class _PooledHTTPSResponse:
+    """Wrapper sobre `http.client.HTTPResponse` que só devolve a conexão TLS ao pool se o corpo for drenado até EOF."""
+
+    def __init__(
+        self,
+        resp: http.client.HTTPResponse,
+        conn: http.client.HTTPSConnection,
+        pool_key: tuple[str, int],
+        url: str,
+        keep_alive: bool,
+    ) -> None:
+        self._resp = resp
+        self._conn = conn
+        self._pool_key = pool_key
+        self._keep_alive = keep_alive
+        self._eof = False
+        self._closed = False
+        self.url = url
+        self.code = int(resp.status)
+        self.status = int(resp.status)
+        self.msg = str(resp.reason or "")
+        self.headers = resp.headers
+
+    def getcode(self) -> int:
+        return self.code
+
+    def geturl(self) -> str:
+        return self.url
+
+    def info(self) -> Any:
+        return self.headers
+
+    def read(self, amt: int | None = None) -> bytes:
+        chunk = self._resp.read() if amt is None else self._resp.read(amt)
+        if amt is None or not chunk or self._resp.isclosed():
+            self._eof = True
+        return chunk
+
+    def readline(self, limit: int = -1) -> bytes:
+        line = self._resp.readline(limit)
+        if not line or self._resp.isclosed():
+            self._eof = True
+        return line
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        reusable = (
+            self._keep_alive
+            and (self._eof or self._resp.isclosed())
+            and not self._resp.will_close
+            and getattr(self._conn, "sock", None) is not None
+        )
+        if reusable:
+            _release_keepalive_conn(self._pool_key, self._conn)
+        else:
+            try:
+                self._resp.close()
+            except Exception:
+                pass
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+
+    def __enter__(self) -> _PooledHTTPSResponse:
+        return self
+
+    def __exit__(self, *args: object) -> bool:
+        self.close()
+        return False
+
+    def __del__(self) -> None:
+        if not self._closed:
+            self._keep_alive = False
+            try:
+                self.close()
+            except Exception:
+                pass
+
+
+class _KeepAliveHTTPSHandler(urllib.request.HTTPSHandler):
+    """Handler HTTPS TLS 1.2+ com reuso Keep-Alive para GET idempotente (elimina ~42 handshakes TLS por ciclo)."""
+
+    def __init__(self, context: ssl.SSLContext) -> None:
+        super().__init__(context=context)
+        self._ssl_context = context
+
+    def https_open(self, req: urllib.request.Request) -> Any:
+        full_url = req.full_url
+        parsed = urllib.parse.urlparse(full_url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise urllib.error.URLError("Somente requisições HTTPS com host válido são permitidas.")
+        host = parsed.hostname
+        port = parsed.port or 443
+        target = (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
+        method = req.get_method().upper()
+        body = req.data
+        timeout = float(getattr(req, "timeout", 15) or 15)
+        can_pool = method == "GET" and body is None
+
+        req_headers: dict[str, str] = {}
+        for k, v in req.header_items():
+            if k.lower() in ("host", "connection"):
+                continue
+            req_headers[k] = v
+        req_headers["Connection"] = "keep-alive" if can_pool else "close"
+        if body is not None and not any(k.lower() == "content-length" for k in req_headers):
+            req_headers["Content-Length"] = str(len(body))
+
+        conn, reused = _acquire_keepalive_conn(host, port, timeout, self._ssl_context, can_pool=can_pool)
+        try:
+            try:
+                conn.request(method, target, body=body, headers=req_headers)
+                resp = conn.getresponse()
+            except (
+                http.client.RemoteDisconnected,
+                http.client.BadStatusLine,
+                BrokenPipeError,
+                ConnectionResetError,
+                TimeoutError,
+                OSError,
+            ) as exc:
+                if not reused:
+                    raise
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                conn = http.client.HTTPSConnection(host, port, timeout=timeout, context=self._ssl_context)
+                conn.request(method, target, body=body, headers=req_headers)
+                resp = conn.getresponse()
+        except Exception as exc:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise urllib.error.URLError(exc) from exc
+
+        if resp.status not in (200, 204):
+            try:
+                err_bytes = resp.read(4096)
+            except Exception:
+                err_bytes = b""
+            hdrs = resp.headers
+            status_code = int(resp.status)
+            reason = str(resp.reason or "")
+            try:
+                resp.close()
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+            wrapped = urllib.response.addinfourl(io.BytesIO(err_bytes), hdrs, full_url, code=status_code)
+            wrapped.msg = reason  # type: ignore[attr-defined]
+            return wrapped
+
+        return _PooledHTTPSResponse(
+            resp=resp,
+            conn=conn,
+            pool_key=(host.lower(), port),
+            url=full_url,
+            keep_alive=(can_pool and resp.status == 200 and not resp.will_close),
+        )
 
 
 class _HttpsOnlySchemeHandler(urllib.request.BaseHandler):
@@ -287,9 +571,11 @@ def _get_opener() -> urllib.request.OpenerDirector:
         ctx.verify_mode = ssl.CERT_REQUIRED
         if hasattr(ssl, "OP_NO_COMPRESSION"):
             ctx.options |= ssl.OP_NO_COMPRESSION
+        # ProxyHandler({}) bloqueia redirecionamento implícito via HTTP_PROXY/HTTPS_PROXY (protege headers Authorization)
         opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
             _HttpsOnlySchemeHandler(),
-            urllib.request.HTTPSHandler(context=ctx),
+            _KeepAliveHTTPSHandler(context=ctx),
             _NoRedirectHandler(),
         )
         _TLS_LOCALS.opener = opener
@@ -302,9 +588,9 @@ def _validate_outbound_https(
     path_prefix: str = "/",
     allow_query: bool = True,
 ) -> urllib.parse.ParseResult:
-    """Valida esquema HTTPS, host exato, porta 443, ausência de credenciais/fragmentos/traversal e prefixo de caminho."""
+    """Valida esquema HTTPS, ASCII estrito, host exato, porta 443, ausência de credenciais/fragmentos/traversal e prefixo."""
     clean = (url or "").strip()
-    if not clean or URL_FORBIDDEN_CHARS_RE.search(clean):
+    if not clean or not clean.isascii() or URL_FORBIDDEN_CHARS_RE.search(clean) or URL_ENCODED_CTRL_RE.search(clean):
         raise ValueError("URL inválida ou com caracteres de controle proibidos.")
     parsed = urllib.parse.urlparse(clean)
     if parsed.scheme != "https" or (parsed.hostname or "").lower() != allowed_host.lower():
@@ -330,6 +616,10 @@ def _validate_outbound_https(
 
 
 def _read_bounded_json(resp: Any, max_bytes: int = MAX_HTTP_BYTES) -> dict[str, Any]:
+    raw_len = str(resp.headers.get("Content-Length") or "").strip() if hasattr(resp, "headers") else ""
+    if raw_len.isdigit() and int(raw_len) > max_bytes:
+        raise ValueError(f"Resposta HTTP anunciou tamanho acima do limite seguro ({max_bytes} bytes).")
+
     raw_chunks: list[bytes] = []
     total = 0
     while True:
@@ -360,6 +650,37 @@ def _read_bounded_json(resp: Any, max_bytes: int = MAX_HTTP_BYTES) -> dict[str, 
     if not isinstance(parsed, dict):
         raise ValueError("Formato JSON inesperado.")
     return parsed
+
+
+def _safe_literal_eval(raw: str, max_len: int = 65536, max_depth: int = MAX_AST_NESTING_DEPTH) -> Any:
+    """Wrapper defensivo sobre `ast.literal_eval` com limite de tamanho e profundidade de aninhamento (anti-DoS)."""
+    if not isinstance(raw, str) or not (2 <= len(raw) <= max_len):
+        return None
+    depth = 0
+    in_quote = ""
+    escaped = False
+    for ch in raw:
+        if escaped:
+            escaped = False
+            continue
+        if in_quote:
+            if ch == "\\":
+                escaped = True
+            elif ch == in_quote:
+                in_quote = ""
+            continue
+        if ch in ("'", '"'):
+            in_quote = ch
+        elif ch in "([{":
+            depth += 1
+            if depth > max_depth:
+                return None
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+    try:
+        return ast.literal_eval(raw)
+    except (ValueError, SyntaxError, TypeError, RecursionError, MemoryError):
+        return None
 
 
 def _extract_pids_from_seq(seq: Any) -> set[int]:
@@ -413,32 +734,70 @@ def _parse_radar_state_active_pids(
     active_pids: set[int] = set()
     active_pids.update(_extract_pids_from_seq(data.get("last_alert_coh3_pids")))
 
-    raw_digest = data.get("last_digest")
-    if isinstance(raw_digest, str) and 2 <= len(raw_digest) <= 65536:
-        try:
-            dig = ast.literal_eval(raw_digest)
-            if isinstance(dig, tuple) and dig and isinstance(dig[0], tuple):
-                vet_tuple = dig[0]
-                if len(vet_tuple) >= 1:
-                    active_pids.update(_extract_pids_from_seq(vet_tuple[0]))
-                if len(vet_tuple) >= 3:
-                    active_pids.update(_extract_pids_from_seq(vet_tuple[2]))
-        except (ValueError, SyntaxError, TypeError, RecursionError, MemoryError):
-            pass
+    dig = _safe_literal_eval(data.get("last_digest") or "")
+    if isinstance(dig, tuple) and dig and isinstance(dig[0], tuple):
+        vet_tuple = dig[0]
+        if len(vet_tuple) >= 1:
+            active_pids.update(_extract_pids_from_seq(vet_tuple[0]))
+        if len(vet_tuple) >= 3:
+            active_pids.update(_extract_pids_from_seq(vet_tuple[2]))
 
-    raw_fast_sig = data.get("last_steam_fast_sig")
-    if isinstance(raw_fast_sig, str) and 2 <= len(raw_fast_sig) <= 65536:
-        try:
-            fast = ast.literal_eval(raw_fast_sig)
-            if isinstance(fast, tuple) and fast:
-                for sid in _extract_steam_ids_from_seq(fast[0]):
-                    mapped_pid = sid_map.get(sid)
-                    if mapped_pid is not None and mapped_pid > 0:
-                        active_pids.add(int(mapped_pid))
-        except (ValueError, SyntaxError, TypeError, RecursionError, MemoryError):
-            pass
+    fast = _safe_literal_eval(data.get("last_steam_fast_sig") or "")
+    if isinstance(fast, tuple) and fast:
+        for sid in _extract_steam_ids_from_seq(fast[0]):
+            mapped_pid = sid_map.get(sid)
+            if mapped_pid is not None and mapped_pid > 0:
+                active_pids.add(int(mapped_pid))
 
     return active_pids & allowed_pids
+
+
+def _fetch_github_raw_json(
+    url: str,
+    expected_path: str,
+    max_bytes: int = MAX_RADAR_BYTES,
+    timeout: int = 8,
+) -> dict[str, Any] | None:
+    """Lê JSON público de `raw.githubusercontent.com` com validação estrita de URL, limite de bytes e cache ETag/304."""
+    parsed = _validate_outbound_https(url, RADAR_HOST, path_prefix=expected_path, allow_query=False)
+    if parsed.path != expected_path:
+        raise ValueError("Caminho raw.githubusercontent.com fora da allowlist.")
+
+    with _RAW_JSON_CACHE_LOCK:
+        cached_entry = _RAW_JSON_ETAG_CACHE.get(url)
+
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip",
+        "Cache-Control": "no-cache",
+    }
+    if cached_entry is not None and cached_entry[0]:
+        headers["If-None-Match"] = cached_entry[0]
+
+    for attempt in range(2):
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with _get_opener().open(req, timeout=timeout) as resp:
+                data = _read_bounded_json(resp, max_bytes=max_bytes)
+                etag = str(resp.headers.get("ETag") or "").strip() if hasattr(resp, "headers") else ""
+            if etag:
+                with _RAW_JSON_CACHE_LOCK:
+                    _RAW_JSON_ETAG_CACHE[url] = (etag, copy.deepcopy(data))
+            return data
+        except urllib.error.HTTPError as exc:
+            try:
+                exc.read(256)
+            except Exception:
+                pass
+            if int(exc.code or 0) == 304 and cached_entry is not None:
+                return copy.deepcopy(cached_entry[1])
+            if attempt == 0:
+                time.sleep(0.6)
+        except Exception:
+            if attempt == 0:
+                time.sleep(0.6)
+    return None
 
 
 def fetch_veteranos_radar_active_pids(max_age_sec: int = RADAR_MAX_AGE_SEC) -> tuple[set[int], int, bool]:
@@ -447,32 +806,17 @@ def fetch_veteranos_radar_active_pids(max_age_sec: int = RADAR_MAX_AGE_SEC) -> t
     (`nigosky/coh3-br-lobby-radar`) e retorna `(active_pids, last_sync_ts, ok)`.
     Não exige nem manipula `STEAM_WEB_API_KEY`.
     """
-    parsed = _validate_outbound_https(RADAR_STATE_URL, RADAR_HOST, path_prefix=RADAR_STATE_PATH, allow_query=False)
-    if parsed.path != RADAR_STATE_PATH:
-        raise ValueError("Caminho do Radar fora da allowlist.")
-
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json",
-        "Accept-Encoding": "gzip",
-        "Cache-Control": "no-cache",
-    }
-    for attempt in range(2):
-        req = urllib.request.Request(RADAR_STATE_URL, headers=headers, method="GET")
-        try:
-            with _get_opener().open(req, timeout=8) as resp:
-                data = _read_bounded_json(resp, max_bytes=MAX_RADAR_BYTES)
-
-            last_sync_ts = int(data.get("last_sync_ts", 0) or 0)
-            now_ts = int(time.time())
-            if max_age_sec > 0 and last_sync_ts > 0 and (now_ts - last_sync_ts) > max_age_sec:
-                return set(), last_sync_ts, False
-
-            return _parse_radar_state_active_pids(data), last_sync_ts, True
-        except Exception:
-            if attempt == 0:
-                time.sleep(0.6)
-    return set(), 0, False
+    data = _fetch_github_raw_json(RADAR_STATE_URL, expected_path=RADAR_STATE_PATH, max_bytes=MAX_RADAR_BYTES)
+    if data is None:
+        return set(), 0, False
+    try:
+        last_sync_ts = int(data.get("last_sync_ts", 0) or 0)
+    except (TypeError, ValueError):
+        last_sync_ts = 0
+    now_ts = int(time.time())
+    if max_age_sec > 0 and last_sync_ts > 0 and (now_ts - last_sync_ts) > max_age_sec:
+        return set(), last_sync_ts, False
+    return _parse_radar_state_active_pids(data), last_sync_ts, True
 
 
 def parse_shared_roster_details(data: dict[str, Any]) -> tuple[tuple[tuple[int, str], ...], dict[str, int]]:
@@ -496,7 +840,7 @@ def parse_shared_roster_details(data: dict[str, Any]) -> tuple[tuple[tuple[int, 
         if pid <= 0 or pid in seen_pids:
             continue
         seen_pids.add(pid)
-        alias = str(row.get("original_alias") or row.get("alias") or f"Player {pid}").strip()[:40]
+        alias = _sanitize_alias(row.get("original_alias") or row.get("alias"), fallback=f"Player {pid}")
         if int(row.get("merged_into_profile_id", 0) or 0) > 0 and "(sec)" not in alias:
             alias = f"{alias} (sec)"
         profiles.append((pid, alias))
@@ -521,28 +865,15 @@ def fetch_shared_monitored_profiles(url: str = SHARED_ROSTER_URL) -> tuple[tuple
     Retorna `None` em caso de falha transitória (mantendo fallback seguro).
     """
     global _LAST_FETCHED_STEAM_ID_TO_PID
-    parsed = _validate_outbound_https(url, RADAR_HOST, path_prefix=SHARED_ROSTER_PATH, allow_query=False)
-    if parsed.path != SHARED_ROSTER_PATH:
-        raise ValueError("Caminho do roster compartilhado fora da allowlist.")
-
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json",
-        "Accept-Encoding": "gzip",
-        "Cache-Control": "no-cache",
-    }
-    for attempt in range(2):
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        try:
-            with _get_opener().open(req, timeout=8) as resp:
-                data = _read_bounded_json(resp, max_bytes=MAX_RADAR_BYTES)
-            profiles, sid_map = parse_shared_roster_details(data)
-            _LAST_FETCHED_STEAM_ID_TO_PID = dict(sid_map)
-            return profiles
-        except Exception:
-            if attempt == 0:
-                time.sleep(0.6)
-    return None
+    data = _fetch_github_raw_json(url, expected_path=SHARED_ROSTER_PATH, max_bytes=MAX_RADAR_BYTES)
+    if data is None:
+        return None
+    try:
+        profiles, sid_map = parse_shared_roster_details(data)
+    except Exception:
+        return None
+    _LAST_FETCHED_STEAM_ID_TO_PID = dict(sid_map)
+    return profiles
 
 
 def refresh_monitored_profiles(url: str = SHARED_ROSTER_URL) -> bool:
@@ -575,58 +906,76 @@ def refresh_monitored_profiles(url: str = SHARED_ROSTER_URL) -> bool:
     return True
 
 
-def fetch_personal_stat_last_match(pids: list[int]) -> dict[int, int]:
-    """
-    Consulta `getPersonalStat` da Relic (lotes de até 10 contas) apenas para o subconjunto
-    sinalizado pelo Radar dos Veteranos, retornando `{profile_id: max_lastmatchdate}`.
-    """
-    clean_pids = sorted({int(p) for p in pids if int(p) > 0})
-    if not clean_pids:
-        return {}
+def _fetch_personal_stat_chunk(chunk: list[int]) -> dict[int, int]:
+    """Consulta um lote (até 10 contas) em `getPersonalStat` com 1 retry automático."""
+    target_set = set(chunk)
+    encoded_ids = urllib.parse.quote("[" + ",".join(str(p) for p in chunk) + "]")
+    url = f"{BASE_URL}/getPersonalStat?title=coh3&profile_ids={encoded_ids}"
+    _validate_outbound_https(url, RELIC_HOST, path_prefix="/community/leaderboard/")
 
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/json",
         "Accept-Encoding": "gzip",
     }
-    latest: dict[int, int] = {}
-    for idx in range(0, len(clean_pids), 10):
-        chunk = clean_pids[idx : idx + 10]
-        target_set = set(chunk)
-        encoded_ids = urllib.parse.quote("[" + ",".join(str(p) for p in chunk) + "]")
-        url = f"{BASE_URL}/getPersonalStat?title=coh3&profile_ids={encoded_ids}"
-        _validate_outbound_https(url, RELIC_HOST, path_prefix="/community/leaderboard/")
-
+    data: dict[str, Any] | None = None
+    for attempt in range(2):
         try:
             req = urllib.request.Request(url, headers=headers, method="GET")
             with _get_opener().open(req, timeout=12) as resp:
                 data = _read_bounded_json(resp)
+            break
         except Exception:
+            if attempt == 0:
+                time.sleep(0.5)
+    if data is None:
+        return {}
+
+    sg_to_pids: dict[int, list[int]] = {}
+    for sg in data.get("statGroups") or []:
+        if not isinstance(sg, dict) or "id" not in sg:
             continue
+        matched = [
+            int(m.get("profile_id", 0) or 0)
+            for m in (sg.get("members") or [])
+            if isinstance(m, dict) and int(m.get("profile_id", 0) or 0) in target_set
+        ]
+        if matched:
+            sg_to_pids[int(sg["id"])] = matched
 
-        sg_to_pids: dict[int, list[int]] = {}
-        for sg in data.get("statGroups") or []:
-            if not isinstance(sg, dict) or "id" not in sg:
-                continue
-            matched = [
-                int(m.get("profile_id", 0) or 0)
-                for m in (sg.get("members") or [])
-                if isinstance(m, dict) and int(m.get("profile_id", 0) or 0) in target_set
-            ]
-            if matched:
-                sg_to_pids[int(sg["id"])] = matched
+    chunk_latest: dict[int, int] = {}
+    for st in data.get("leaderboardStats") or []:
+        if not isinstance(st, dict):
+            continue
+        sg_id = int(st.get("statgroup_id", -1))
+        lmd = int(st.get("lastmatchdate", 0) or 0)
+        if lmd <= 0 or sg_id not in sg_to_pids:
+            continue
+        for pid in sg_to_pids[sg_id]:
+            if lmd > chunk_latest.get(pid, 0):
+                chunk_latest[pid] = lmd
+    return chunk_latest
 
-        for st in data.get("leaderboardStats") or []:
-            if not isinstance(st, dict):
-                continue
-            sg_id = int(st.get("statgroup_id", -1))
-            lmd = int(st.get("lastmatchdate", 0) or 0)
-            if lmd <= 0 or sg_id not in sg_to_pids:
-                continue
-            for pid in sg_to_pids[sg_id]:
+
+def fetch_personal_stat_last_match(pids: list[int]) -> dict[int, int]:
+    """
+    Consulta `getPersonalStat` da Relic (lotes de até 10 contas, em paralelo para auditorias amplas),
+    retornando `{profile_id: max_lastmatchdate}`.
+    """
+    clean_pids = sorted({int(p) for p in pids if int(p) > 0})
+    if not clean_pids:
+        return {}
+
+    chunks = [clean_pids[idx : idx + 10] for idx in range(0, len(clean_pids), 10)]
+    if len(chunks) == 1:
+        return _fetch_personal_stat_chunk(chunks[0])
+
+    latest: dict[int, int] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(3, len(chunks))) as pool:
+        for chunk_res in pool.map(_fetch_personal_stat_chunk, chunks):
+            for pid, lmd in chunk_res.items():
                 if lmd > latest.get(pid, 0):
                     latest[pid] = lmd
-
     return latest
 
 
@@ -647,7 +996,7 @@ def fetch_latest_player_marker(profile_id: int) -> tuple[int, int, int, bool, in
     for attempt in range(2):
         req = urllib.request.Request(url, headers=headers, method="GET")
         try:
-            with _get_opener().open(req, timeout=15) as resp:
+            with _get_opener().open(req, timeout=12) as resp:
                 data = _read_bounded_json(resp)
             stats = data.get("matchHistoryStats") or []
             max_mid = 0
@@ -874,12 +1223,80 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_name, 0o644)
         if path.is_symlink():
             raise RuntimeError(f"Escrita bloqueada em symlink não confiável: {path}")
         os.replace(tmp_name, path)
     finally:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)
+
+
+def merge_states_monotonic(remote_state: dict[str, Any], local_state: dict[str, Any]) -> dict[str, Any]:
+    """
+    Mescla dois snapshots de `state.json` de forma estritamente monotônica (sem conflito textual de git):
+    - Timestamps numéricos e marcadores ISO de ranking/semana nunca regridem (`max`).
+    - Entradas de `players` preservam os maiores `max_match_id`, `max_completion_time` e `max_stat_lmd`.
+    - Estado de follow-up BG e lista do Radar prevalecem do snapshot mais recente (empate favorece `local_state`).
+    """
+    rem = remote_state if isinstance(remote_state, dict) else {}
+    loc = local_state if isinstance(local_state, dict) else {}
+
+    def _int(d: dict[str, Any], key: str, default: int = 0) -> int:
+        try:
+            return int(d.get(key, default) or default)
+        except (TypeError, ValueError):
+            return default
+
+    def _str(d: dict[str, Any], key: str) -> str:
+        return str(d.get(key) or "").strip()
+
+    rem_dispatch_ts = _int(rem, "last_dispatch_ts")
+    loc_dispatch_ts = _int(loc, "last_dispatch_ts")
+    bg_src = loc if loc_dispatch_ts >= rem_dispatch_ts else rem
+
+    rem_radar_ts = _int(rem, "radar_last_sync_ts")
+    loc_radar_ts = _int(loc, "radar_last_sync_ts")
+    radar_src = loc if loc_radar_ts >= rem_radar_ts else rem
+
+    merged_players: dict[str, dict[str, int]] = {}
+    rem_players = rem.get("players") if isinstance(rem.get("players"), dict) else {}
+    loc_players = loc.get("players") if isinstance(loc.get("players"), dict) else {}
+    for key in sorted(set(rem_players.keys()) | set(loc_players.keys())):
+        if not str(key).isdigit():
+            continue
+        r_ent = rem_players.get(key) if isinstance(rem_players.get(key), dict) else {}
+        l_ent = loc_players.get(key) if isinstance(loc_players.get(key), dict) else {}
+        entry: dict[str, int] = {
+            "max_match_id": max(_int(r_ent, "max_match_id"), _int(l_ent, "max_match_id")),
+            "max_completion_time": max(_int(r_ent, "max_completion_time"), _int(l_ent, "max_completion_time")),
+        }
+        max_stat = max(_int(r_ent, "max_stat_lmd"), _int(l_ent, "max_stat_lmd"))
+        if max_stat > 0:
+            entry["max_stat_lmd"] = max(max_stat, entry["max_completion_time"])
+        merged_players[str(key)] = entry
+
+    return {
+        "schema_version": max(2, _int(rem, "schema_version", 2), _int(loc, "schema_version", 2)),
+        "last_checked_ts": max(_int(rem, "last_checked_ts"), _int(loc, "last_checked_ts")),
+        "last_dispatch_ts": max(rem_dispatch_ts, loc_dispatch_ts),
+        "last_full_stat_audit_ts": max(_int(rem, "last_full_stat_audit_ts"), _int(loc, "last_full_stat_audit_ts")),
+        "last_weekly_summary_iso_week": max(
+            _str(rem, "last_weekly_summary_iso_week"),
+            _str(loc, "last_weekly_summary_iso_week"),
+        ),
+        "last_ranking_daily_date": max(_str(rem, "last_ranking_daily_date"), _str(loc, "last_ranking_daily_date")),
+        "last_ranking_slot": max(_str(rem, "last_ranking_slot"), _str(loc, "last_ranking_slot")),
+        "last_ranking_bg_slot": max(_str(rem, "last_ranking_bg_slot"), _str(loc, "last_ranking_bg_slot")),
+        "pending_bg_followup_due_ts": _int(bg_src, "pending_bg_followup_due_ts"),
+        "pending_bg_followup_match_id": _int(bg_src, "pending_bg_followup_match_id"),
+        "pending_bg_followup_wave": _int(bg_src, "pending_bg_followup_wave"),
+        "radar_coh3_pids": sorted(_extract_pids_from_seq(radar_src.get("radar_coh3_pids"))),
+        "radar_last_sync_ts": max(rem_radar_ts, loc_radar_ts),
+        "players": merged_players,
+    }
 
 
 def write_github_outputs(outputs: dict[str, str]) -> None:
@@ -889,12 +1306,17 @@ def write_github_outputs(outputs: dict[str, str]) -> None:
     out_path = Path(gh_out)
     if out_path.is_symlink():
         raise RuntimeError("GITHUB_OUTPUT não pode ser symlink.")
-    with open(out_path, "a", encoding="utf-8") as fh:
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(out_path, flags, 0o600)
+    except OSError as exc:
+        raise RuntimeError("Falha segura ao abrir GITHUB_OUTPUT (symlink bloqueado).") from exc
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
         for k, v in outputs.items():
             clean_k = str(k).strip()
             if not clean_k or not re.fullmatch(r"[A-Za-z0-9_]+", clean_k):
                 continue
-            clean_v = redact_secrets(str(v).replace("\r", " ").replace("\n", " ").strip())
+            clean_v = _sanitize_log_line(v).replace("<", "").replace(">", "").replace("`", "")
             fh.write(f"{clean_k}={clean_v}\n")
 
 
@@ -947,13 +1369,15 @@ def evaluate_precheck(
         else _extract_pids_from_seq(prev.get("radar_coh3_pids"))
     )
 
-    alias_by_pid = {pid: alias for pid, alias in MONITORED_PROFILES}
+    alias_by_pid = {pid: _sanitize_alias(alias, fallback=f"Player {pid}") for pid, alias in MONITORED_PROFILES}
     all_monitored_pids = [pid for pid, _ in MONITORED_PROFILES]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
-        results = list(pool.map(fetch_latest_player_marker, all_monitored_pids))
 
-    # Checagem cruzada somente-leitura com o Radar dos Veteranos (nigosky/coh3-br-lobby-radar)
-    curr_radar_pids, radar_sync_ts, radar_ok = fetch_veteranos_radar_active_pids()
+    # Consulta Relic History + Radar dos Veteranos em paralelo (6 workers Keep-Alive evita throttling da Relic)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        radar_future = pool.submit(fetch_veteranos_radar_active_pids)
+        results = list(pool.map(fetch_latest_player_marker, all_monitored_pids))
+        curr_radar_pids, radar_sync_ts, radar_ok = radar_future.result()
+
     exited_radar_pids = (prev_radar_pids - curr_radar_pids) if radar_ok else set()
     focus_radar_pids = (curr_radar_pids | exited_radar_pids) if radar_ok else set()
 
@@ -973,14 +1397,14 @@ def evaluate_precheck(
     if run_full_stat_audit:
         retry_candidate_pids.update(pid for pid, rec in results_by_pid.items() if not rec[3])
 
-    radar_failed_aliases: list[str] = []
+    radar_failed_pids: set[int] = set()
     for fpid in sorted(retry_candidate_pids):
         _, _, _, ok_first, _, _ = results_by_pid.get(fpid, (fpid, 0, 0, False, 0, 0))
         if not ok_first:
             retry_res = fetch_latest_player_marker(fpid)
             results_by_pid[fpid] = retry_res
             if not retry_res[3] and fpid in focus_radar_pids:
-                radar_failed_aliases.append(alias_by_pid.get(fpid, str(fpid)))
+                radar_failed_pids.add(fpid)
 
     ok_count = 0
     new_activity_players: list[str] = []
@@ -993,25 +1417,28 @@ def evaluate_precheck(
     }
 
     for pid, _ in MONITORED_PROFILES:
-        _, max_mid, max_ct, ok, max_auto_mid, max_auto_ct = results_by_pid[pid]
+        _, max_mid, max_ct, ok, max_auto_mid, max_auto_ct = results_by_pid.get(pid, (pid, 0, 0, False, 0, 0))
         key = str(pid)
         if not ok:
             continue
         ok_count += 1
+        is_existing_player = key in prev_players
         old_entry = prev_players.get(key) or {}
         old_mid = int(old_entry.get("max_match_id", 0) or 0)
         old_ct = int(old_entry.get("max_completion_time", 0) or 0)
         old_stat_lmd = int(old_entry.get("max_stat_lmd", 0) or 0)
         if prev_players and (max_mid > old_mid or max_ct > old_ct):
-            new_activity_players.append(f"{alias_by_pid.get(pid, str(pid))} (#{max_mid})")
-            new_activity_pids.add(pid)
-            if (
-                max_auto_ct > 0
-                and (max_auto_mid > old_mid or max_auto_ct > old_ct)
-                and (now_ts - max_auto_ct) < BG_FOLLOWUP_FRESH_MATCH_SEC
-            ):
-                if max_auto_mid > fresh_automatch_mid:
-                    fresh_automatch_mid = max_auto_mid
+            # Contas recém-adicionadas ao roster com última partida antiga (>72h) apenas semeiam o baseline (evita falso positivo)
+            if is_existing_player or (max_ct > 0 and (now_ts - max_ct) <= QUIET_STAT_RECENT_WINDOW_SEC):
+                new_activity_players.append(f"{alias_by_pid.get(pid, str(pid))} (#{max_mid})")
+                new_activity_pids.add(pid)
+                if (
+                    max_auto_ct > 0
+                    and (max_auto_mid > old_mid or max_auto_ct > old_ct)
+                    and (now_ts - max_auto_ct) < BG_FOLLOWUP_FRESH_MATCH_SEC
+                ):
+                    if max_auto_mid > fresh_automatch_mid:
+                        fresh_automatch_mid = max_auto_mid
         entry_next: dict[str, int] = {
             "max_match_id": max(max_mid, old_mid),
             "max_completion_time": max(max_ct, old_ct),
@@ -1025,6 +1452,7 @@ def evaluate_precheck(
     # - A cada 1h de silêncio, varredura completa em 100% do elenco (inclusive Steam privado!)
     radar_stat_triggers: list[str] = []
     quiet_stat_triggers: list[str] = []
+    stat_lmd_map: dict[int, int] = {}
     stat_target_pids = sorted(set(all_monitored_pids) if run_full_stat_audit else focus_radar_pids)
     if stat_target_pids:
         stat_lmd_map = fetch_personal_stat_last_match(stat_target_pids)
@@ -1033,6 +1461,7 @@ def evaluate_precheck(
             if stat_lmd <= 0:
                 continue
             key = str(fpid)
+            is_existing_player = key in prev_players
             old_entry = prev_players.get(key) or {}
             old_ct = int(old_entry.get("max_completion_time", 0) or 0)
             old_stat_lmd = int(old_entry.get("max_stat_lmd", 0) or 0)
@@ -1046,6 +1475,8 @@ def evaluate_precheck(
 
             if not prev_players or fpid in new_activity_pids:
                 continue
+            if not is_existing_player and (now_ts - stat_lmd) > QUIET_STAT_RECENT_WINDOW_SEC:
+                continue
             if fpid in focus_radar_pids:
                 if stat_lmd > (baseline_ts + 10):
                     radar_stat_triggers.append(alias_by_pid.get(fpid, str(fpid)))
@@ -1055,6 +1486,13 @@ def evaluate_precheck(
             ):
                 quiet_stat_triggers.append(alias_by_pid.get(fpid, str(fpid)))
 
+    # Só dispara fallback do Radar se getPersonalStat TAMBÉM não respondeu para a conta com falha
+    radar_failed_aliases = [
+        alias_by_pid.get(fpid, str(fpid))
+        for fpid in sorted(radar_failed_pids)
+        if int(stat_lmd_map.get(fpid, 0) or 0) <= 0
+    ]
+
     reasons: list[str] = []
     mark_weekly_done = False
 
@@ -1063,20 +1501,13 @@ def evaluate_precheck(
     if not prev_players:
         reasons.append("inicializacao do baseline de estado (1a execucao)")
     if new_activity_players:
-        sample = ", ".join(new_activity_players[:4])
-        extra = f" +{len(new_activity_players) - 4}" if len(new_activity_players) > 4 else ""
-        reasons.append(f"nova partida detectada: {sample}{extra}")
+        reasons.append(f"nova partida detectada: {_format_sample(new_activity_players)}")
     if radar_stat_triggers:
-        sample_r = ", ".join(radar_stat_triggers[:4])
-        extra_r = f" +{len(radar_stat_triggers) - 4}" if len(radar_stat_triggers) > 4 else ""
-        reasons.append(f"Radar Veteranos + Relic PersonalStat detectou partida recente: {sample_r}{extra_r}")
+        reasons.append(f"Radar Veteranos + Relic PersonalStat detectou partida recente: {_format_sample(radar_stat_triggers)}")
     if quiet_stat_triggers:
-        sample_q = ", ".join(quiet_stat_triggers[:4])
-        extra_q = f" +{len(quiet_stat_triggers) - 4}" if len(quiet_stat_triggers) > 4 else ""
-        reasons.append(f"Auditoria de silencio (1h) + Relic PersonalStat detectou partida recente: {sample_q}{extra_q}")
+        reasons.append(f"Auditoria de silencio (1h) + Relic PersonalStat detectou partida recente: {_format_sample(quiet_stat_triggers)}")
     if radar_failed_aliases:
-        sample_f = ", ".join(radar_failed_aliases[:4])
-        reasons.append(f"Radar Veteranos: fallback p/ rechecagem Relic ({sample_f})")
+        reasons.append(f"Radar Veteranos: fallback p/ rechecagem Relic ({_format_sample(radar_failed_aliases)})")
     bg_followup_due = (
         prev_bg_due_ts > 0
         and now_ts >= prev_bg_due_ts
@@ -1090,19 +1521,24 @@ def evaluate_precheck(
     if now_brt.weekday() == 0 and (now_brt.hour, now_brt.minute) >= (0, 5) and last_weekly_week != current_iso_week:
         reasons.append(f"janela do Resumo Semanal ({current_iso_week} segunda >= 00:05 BRT)")
         mark_weekly_done = True
+    outage_cooldown_active = False
     if ok_count == 0:
-        reasons.append("fallback de seguranca (Relic API indisponivel na pre-checagem)")
+        if last_dispatch_ts <= 0 or (now_ts - last_dispatch_ts) >= RELIC_OUTAGE_FALLBACK_COOLDOWN_SEC:
+            reasons.append("fallback de seguranca (Relic API indisponivel na pre-checagem)")
+        else:
+            outage_cooldown_active = True
     elif last_dispatch_ts <= 0 or (now_ts - last_dispatch_ts) >= HEARTBEAT_INTERVAL_SEC:
         elapsed_h = round((now_ts - last_dispatch_ts) / 3600.0, 1) if last_dispatch_ts > 0 else 0.0
         reasons.append(f"heartbeat periodico de auditoria profunda ({elapsed_h}h desde ultimo ciclo)")
 
     should_dispatch = len(reasons) > 0
     audit_suffix = " | auditoria silencio 1h OK (100% PersonalStat)" if run_full_stat_audit else ""
-    reason_str = (
-        " | ".join(reasons)
-        if reasons
-        else f"sem novas partidas ({ok_count}/{len(MONITORED_PROFILES)} contas verificadas{audit_suffix})"
-    )
+    if reasons:
+        reason_str = " | ".join(reasons)
+    elif outage_cooldown_active:
+        reason_str = f"Relic API indisponivel (0/{len(MONITORED_PROFILES)} contas OK; circuit breaker 30m ativo)"
+    else:
+        reason_str = f"sem novas partidas ({ok_count}/{len(MONITORED_PROFILES)} contas verificadas{audit_suffix})"
 
     dispatched_ok = False
     http_code = 0
@@ -1186,6 +1622,7 @@ def evaluate_precheck(
             atomic_write_json(state_path, next_state)
             state_persisted = True
 
+    close_keepalive_pool()
     meta = {
         "ok_accounts": ok_count,
         "total_accounts": len(MONITORED_PROFILES),
@@ -1195,6 +1632,7 @@ def evaluate_precheck(
         "radar_exited_pids": sorted(exited_radar_pids),
         "full_stat_audit_ran": run_full_stat_audit,
         "full_stat_audit_ts": now_ts if run_full_stat_audit else prev_full_audit_ts,
+        "outage_cooldown_active": outage_cooldown_active,
         "ranking_dispatches": ranking_events,
         "ranking_dispatches_ok": sum(1 for ev in ranking_events if ev["ok"]),
         "ranking_dispatches_failed": sum(1 for ev in ranking_events if not ev["ok"]),
@@ -1207,15 +1645,43 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="CoH3 BR Smart Pre-Check Scheduler")
     parser.add_argument("--loop-cycles", type=int, default=1, help="Quantidade de ciclos por sessao (1..24)")
     parser.add_argument("--loop-interval-sec", type=int, default=300, help="Intervalo em segundos entre ciclos")
+    parser.add_argument(
+        "--max-session-sec",
+        type=int,
+        default=DEFAULT_MAX_SESSION_SEC,
+        help="Orcamento maximo da sessao em segundos antes de encerrar graciosamente (0 = ilimitado)",
+    )
     parser.add_argument("--force", action="store_true", help="Forca disparo no 1o ciclo")
     parser.add_argument("--dry-run", action="store_true", help="Simula checagem sem disparar nem gravar estado")
+    parser.add_argument(
+        "--merge-state",
+        type=str,
+        default="",
+        help="Mescla monotonicamente um snapshot local JSON com o state.json atual e encerra",
+    )
     args = parser.parse_args()
-
-    cycles = max(1, min(24, int(args.loop_cycles)))
-    interval_sec = max(30, min(900, int(args.loop_interval_sec)))
 
     repo_dir = Path(__file__).resolve().parent
     state_path = repo_dir / "state.json"
+
+    if args.merge_state:
+        candidate_path = Path(args.merge_state)
+        if not candidate_path.is_file() or candidate_path.is_symlink():
+            print("::error::Arquivo de merge invalido ou symlink bloqueado.", flush=True)
+            return 1
+        remote_state = load_state(state_path)
+        local_state = load_state(candidate_path)
+        if not local_state:
+            print("::error::Snapshot local de state.json vazio ou invalido para merge.", flush=True)
+            return 1
+        merged = merge_states_monotonic(remote_state, local_state)
+        atomic_write_json(state_path, merged)
+        return 0
+
+    cycles = max(1, min(24, int(args.loop_cycles)))
+    interval_sec = max(30, min(900, int(args.loop_interval_sec)))
+    max_session_sec = max(0, min(7200, int(args.max_session_sec)))
+
     force_first = args.force or (os.environ.get("FORCE_DISPATCH", "false").strip().lower() == "true")
 
     dispatch_token = os.environ.get("TRACKER_DISPATCH_TOKEN", "").strip()
@@ -1245,6 +1711,25 @@ def main() -> int:
         )
         return 1
 
+    stop_event = threading.Event()
+    interrupted_signal = ""
+
+    def _handle_stop(signum: int, _frame: Any) -> None:
+        nonlocal interrupted_signal
+        try:
+            interrupted_signal = signal.Signals(signum).name
+        except Exception:
+            interrupted_signal = f"SIG{signum}"
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _handle_stop)
+        except (ValueError, OSError):
+            pass
+
+    session_start = time.monotonic()
+    executed_cycles = 0
     total_dispatches = 0
     total_ranking_dispatches = 0
     total_skips = 0
@@ -1254,13 +1739,17 @@ def main() -> int:
     mem_last_full_stat_audit_ts: int | None = None
 
     for idx in range(1, cycles + 1):
+        if stop_event.is_set():
+            break
         cycle_start = time.monotonic()
         if idx == 1 or (idx - 1) % 3 == 0:
             synced = refresh_monitored_profiles()
             if idx == 1:
                 src_lbl = "players_roster.json (compartilhado)" if synced else "fallback embutido"
                 print(
-                    f"[ROSTER] Base sincronizada ({src_lbl}): {len(MONITORED_PROFILES)} contas monitoradas.",
+                    _sanitize_log_line(
+                        f"[ROSTER] Base sincronizada ({src_lbl}): {len(MONITORED_PROFILES)} contas monitoradas."
+                    ),
                     flush=True,
                 )
         now_brt_str = datetime.now(tz=BRT_TZ).strftime("%H:%M:%S BRT")
@@ -1283,6 +1772,7 @@ def main() -> int:
             ranking_unified_workflow=ranking_unified_workflow,
             ranking_bg_workflow=ranking_bg_workflow,
         )
+        executed_cycles += 1
         if meta.get("radar_ok"):
             mem_radar_pids = set(meta.get("radar_active_pids") or [])
         if meta.get("full_stat_audit_ran"):
@@ -1295,7 +1785,7 @@ def main() -> int:
                 total_dispatches += 1
                 dispatch_events.append(f"[{now_brt_str}] {reason}")
                 print(
-                    redact_secrets(
+                    _sanitize_log_line(
                         f"[CICLO {idx}/{cycles} • {now_brt_str}] DISPARADO (HTTP {meta['http_code']}) -> "
                         f"{target_owner}/{target_repo}@{target_ref} | Contas OK={last_ok_str} | {radar_tag} | Motivo: {reason}"
                     ),
@@ -1303,8 +1793,9 @@ def main() -> int:
                 )
             else:
                 print(
-                    redact_secrets(
-                        f"::warning::[CICLO {idx}/{cycles} • {now_brt_str}] Falha ao disparar {target_owner}/{target_repo} "
+                    "::warning::"
+                    + _sanitize_log_line(
+                        f"[CICLO {idx}/{cycles} • {now_brt_str}] Falha ao disparar {target_owner}/{target_repo} "
                         f"(HTTP {meta['http_code']}); estado preservado para retentativa no proximo ciclo! | {radar_tag} | Motivo: {reason}"
                     ),
                     flush=True,
@@ -1312,7 +1803,7 @@ def main() -> int:
         else:
             total_skips += 1
             print(
-                redact_secrets(
+                _sanitize_log_line(
                     f"[CICLO {idx}/{cycles} • {now_brt_str}] ECONOMIZADO (SKIP) | Contas OK={last_ok_str} | {radar_tag} | {reason}"
                 ),
                 flush=True,
@@ -1323,7 +1814,7 @@ def main() -> int:
                 total_ranking_dispatches += 1
                 dispatch_events.append(f"[{now_brt_str}] Ranking: {ev['label']} ({ev['workflow']}, slot={ev['slot']})")
                 print(
-                    redact_secrets(
+                    _sanitize_log_line(
                         f"[CICLO {idx}/{cycles} • {now_brt_str}] RANKING DISPARADO (HTTP {ev['http_code']}) -> "
                         f"{ev['owner']}/{ev['repo']}/{ev['workflow']}@{ev['ref']} | Slot={ev['slot']} | "
                         f"Token={ev['token_source']} | {ev['label']}"
@@ -1332,8 +1823,9 @@ def main() -> int:
                 )
             else:
                 print(
-                    redact_secrets(
-                        f"::warning::[CICLO {idx}/{cycles} • {now_brt_str}] Falha ao disparar "
+                    "::warning::"
+                    + _sanitize_log_line(
+                        f"[CICLO {idx}/{cycles} • {now_brt_str}] Falha ao disparar "
                         f"{ev['owner']}/{ev['repo']}/{ev['workflow']} (HTTP {ev['http_code']}, "
                         f"Token={ev['token_source']}); marcador {ev['marker_key']} preservado para retentativa "
                         f"no proximo ciclo! | Slot={ev['slot']} | {ev['label']}"
@@ -1344,16 +1836,36 @@ def main() -> int:
         if idx < cycles:
             elapsed = time.monotonic() - cycle_start
             sleep_for = max(1.0, float(interval_sec) - elapsed)
-            time.sleep(sleep_for)
+            if max_session_sec > 0 and (time.monotonic() - session_start + sleep_for) >= float(max_session_sec):
+                print(
+                    _sanitize_log_line(
+                        f"[SESSAO] Limite seguro de {max_session_sec}s atingido apos ciclo {executed_cycles}/{cycles}; "
+                        "encerrando graciosamente para persistir estado e acionar Self-Relay."
+                    ),
+                    flush=True,
+                )
+                break
+            if stop_event.wait(sleep_for):
+                print(
+                    _sanitize_log_line(
+                        f"[SESSAO] Sinal {interrupted_signal or 'STOP'} recebido apos ciclo {executed_cycles}/{cycles}; "
+                        "encerrando graciosamente sem processos orfaos."
+                    ),
+                    flush=True,
+                )
+                break
 
     summary_reason = (
         " ; ".join(dispatch_events[-3:])
         if dispatch_events
-        else f"Nenhuma partida nova nos {cycles} ciclo(s) ({total_skips} skips)"
+        else f"Nenhuma partida nova nos {executed_cycles} ciclo(s) ({total_skips} skips)"
     )
+    if interrupted_signal:
+        summary_reason = f"{summary_reason} [encerrado via {interrupted_signal}]"
+
     write_github_outputs(
         {
-            "total_cycles": str(cycles),
+            "total_cycles": str(executed_cycles),
             "dispatches_count": str(total_dispatches),
             "ranking_dispatches_count": str(total_ranking_dispatches),
             "skips_count": str(total_skips),

@@ -1,0 +1,90 @@
+name: CoH3 BR Scheduler Watchdog (Auto-Recuperacao)
+
+on:
+  schedule:
+    # Dead-man's switch a cada 30 min (minutos off-peak, isolado do concurrency group do scheduler.yml)
+    - cron: "17,47 * * * *"
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: coh3-br-scheduler-watchdog
+  cancel-in-progress: false
+
+jobs:
+  verify-and-heal:
+    if: github.repository == 'nigosky/coh3-br-scheduler' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Verificar saude da cadeia autonoma e religar se necessario
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELAY_ENABLED_VAR: ${{ vars.SCHEDULER_AUTO_RELAY_ENABLED }}
+        run: |
+          set -euo pipefail
+
+          if [ "${RELAY_ENABLED_VAR:-true}" = "false" ]; then
+            echo "Kill-switch SCHEDULER_AUTO_RELAY_ENABLED=false ativo; watchdog em standby."
+            exit 0
+          fi
+
+          RUNS_JSON="$(gh api 'repos/nigosky/coh3-br-scheduler/actions/workflows/scheduler.yml/runs?per_page=10')"
+
+          ACTIVE_ID="$(printf '%s' "${RUNS_JSON}" | jq -r '
+            [.workflow_runs[] | select(.status == "in_progress" or .status == "queued" or .status == "pending" or .status == "waiting" or .status == "requested")]
+            | .[0].id // ""
+          ')"
+
+          if [ -n "${ACTIVE_ID}" ]; then
+            echo "Cadeia autonoma saudavel: sessao ativa detectada (run #${ACTIVE_ID})."
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              echo "- **Watchdog:** Cadeia ativa (run \`#${ACTIVE_ID}\`), nenhuma acao necessaria." >> "${GITHUB_STEP_SUMMARY}"
+            fi
+            exit 0
+          fi
+
+          # Margem de 90s apos o fim da ultima execucao p/ nao competir com o handoff normal do Self-Relay
+          LAST_UPDATED="$(printf '%s' "${RUNS_JSON}" | jq -r '.workflow_runs[0].updated_at // ""')"
+          LAST_CONCLUSION="$(printf '%s' "${RUNS_JSON}" | jq -r '.workflow_runs[0].conclusion // "unknown"')"
+          LAST_ID="$(printf '%s' "${RUNS_JSON}" | jq -r '.workflow_runs[0].id // "N/D"')"
+          if [ -n "${LAST_UPDATED}" ]; then
+            NOW_EPOCH="$(date -u +%s)"
+            LAST_EPOCH="$(date -u -d "${LAST_UPDATED}" +%s 2>/dev/null || echo 0)"
+            AGE_SEC="$((NOW_EPOCH - LAST_EPOCH))"
+            if [ "${LAST_EPOCH}" -gt 0 ] && [ "${AGE_SEC}" -lt 90 ]; then
+              echo "Ultima sessao (#${LAST_ID}) encerrou ha apenas ${AGE_SEC}s; aguardando handoff normal do Self-Relay."
+              exit 0
+            fi
+          fi
+
+          echo "::warning::Nenhuma sessao ativa de scheduler.yml (ultima: #${LAST_ID}, conclusion=${LAST_CONCLUSION}); religando cadeia autonoma!"
+          RELAY_OK=0
+          for attempt in 1 2 3; do
+            if gh workflow run scheduler.yml \
+              --repo nigosky/coh3-br-scheduler \
+              --ref main \
+              -f force_dispatch=false \
+              -f auto_relay=true; then
+              RELAY_OK=1
+              break
+            fi
+            sleep $((attempt * 5))
+          done
+          if [ "${RELAY_OK}" -ne 1 ]; then
+            echo "::error::Falha ao religar scheduler.yml apos 3 tentativas."
+            exit 1
+          fi
+
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            BRT_NOW="$(TZ='America/Sao_Paulo' date '+%Y-%m-%d %H:%M:%S BRT')"
+            {
+              echo "### CoH3 BR Watchdog — Auto-Recuperação Acionada"
+              echo "- **Horário (BRT):** ${BRT_NOW}"
+              echo "- **Última sessão observada:** \`#${LAST_ID}\` (\`${LAST_CONCLUSION}\`)"
+              echo "- **Ação:** \`scheduler.yml\` religado automaticamente em \`main\` (\`auto_relay=true\`)."
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi

@@ -2,8 +2,8 @@ name: CoH3 BR Scheduler (Smart Pre-Check Dispatcher)
 
 on:
   schedule:
-    # Fallback de auto-recuperacao: caso a cadeia autonoma seja pausada manualmente, o cron religa sozinho
-    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
+    # Fallback secundario de baixa frequencia (auto-recuperacao primaria a cada 30 min roda em watchdog.yml)
+    - cron: "37 */2 * * *"
   push:
     branches:
       - main
@@ -38,11 +38,12 @@ jobs:
       contents: write
       actions: write
     steps:
-      - name: Checkout seguro na branch ativa (SHA imutavel)
+      - name: Checkout seguro na branch ativa (SHA imutavel, sem persistir credenciais)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
-          fetch-depth: 0
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Validar testes da base compartilhada e pre-checagem
         env:
@@ -86,45 +87,105 @@ jobs:
             CYCLES=1
           fi
 
-          python3 precheck.py --loop-cycles "${CYCLES}" --loop-interval-sec 300
+          python3 precheck.py --loop-cycles "${CYCLES}" --loop-interval-sec 300 --max-session-sec 3660
 
-      - name: Auditoria anti-vazamento e persistencia de state.json
+      - name: Auditoria anti-vazamento e persistencia monotonica de state.json
         if: always()
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
           # Bloqueia qualquer padrao de token GitHub/Discord/Steam/dispatch/Authorization/chave privada em TODOS os arquivos rastreados
+          # Usa -l (somente nome do arquivo) para nunca imprimir eventual credencial em logs publicos!
           SECRET_PATTERN="(ptb\.|canary\.)?discord(app)?\.com/api/(v[0-9]+/)?webhooks/[0-9]+|STEAM_WEB_API_KEY=[A-Za-z0-9]{16,}|x-webapi-key[:=][[:space:]]*[A-Za-z0-9]{16,}|[?&]key=[A-Za-z0-9]{16,}|(TRACKER|RANKING)_DISPATCH_TOKEN=[A-Za-z0-9_.-]{16,}|Authorization:[[:space:]]*(Bearer|Basic|Token)[[:space:]]+[A-Za-z0-9._-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
-          if git ls-files -z | xargs -0 grep -InEi "${SECRET_PATTERN}" 2>/dev/null; then
-            echo "::error::Bloqueio de seguranca acionado: padrao de credencial detectado em arquivo rastreado!"
-            exit 1
+          scan_repo_secrets() {
+            local matched
+            matched="$(git ls-files -z | xargs -0 grep -IlEi "${SECRET_PATTERN}" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//' || true)"
+            if [ -n "${matched}" ]; then
+              echo "::error::Bloqueio de seguranca acionado: padrao de credencial detectado em arquivo rastreado (${matched})!"
+              exit 1
+            fi
+          }
+
+          scan_repo_secrets
+
+          if [ ! -f "state.json" ] || [ -L "state.json" ]; then
+            echo "state.json ausente ou symlink bloqueado; pulando persistencia."
+            exit 0
           fi
 
-          if [ -f "state.json" ]; then
-            git add -- state.json
-          fi
-
-          if git diff --cached --name-only | grep -Ei "(^\.env|\.secret$)" >/dev/null 2>&1; then
-            echo "::error::Bloqueio de seguranca acionado: arquivo de segredo staged!"
-            exit 1
-          fi
-
-          if git diff --cached --quiet; then
+          if git diff --quiet -- state.json; then
             echo "Nenhuma alteracao em state.json nesta sessao."
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            exit 0
+          fi
+
+          # Valida integridade JSON e tamanho maximo (256 KB) antes de qualquer commit/push
+          STATE_BYTES="$(wc -c < state.json)"
+          if [ "${STATE_BYTES}" -gt 262144 ] || ! python3 -m json.tool state.json >/dev/null; then
+            echo "::error::Bloqueio de integridade: state.json invalido ou acima de 256 KB (${STATE_BYTES} bytes)!"
+            exit 1
+          fi
+
+          # Credencial efemera via GIT_ASKPASS (nunca gravada em .git/config nem exposta em argv)
+          TMP_BASE="${RUNNER_TEMP:-/tmp}"
+          LOCAL_STATE_SNAP="$(mktemp "${TMP_BASE}/local_state_XXXXXX.json")"
+          ASKPASS_SCRIPT="$(mktemp "${TMP_BASE}/git_askpass_XXXXXX.sh")"
+          cleanup_tmp() {
+            rm -f "${LOCAL_STATE_SNAP}" "${ASKPASS_SCRIPT}"
+          }
+          trap cleanup_tmp EXIT
+
+          cp -f -- state.json "${LOCAL_STATE_SNAP}"
+          cat <<'EOF' > "${ASKPASS_SCRIPT}"
+          #!/usr/bin/env bash
+          case "${1:-}" in
+            *Username*) printf '%s\n' "x-access-token" ;;
+            *Password*) printf '%s\n' "${GH_TOKEN}" ;;
+            *) printf '\n' ;;
+          esac
+          EOF
+          chmod 700 "${ASKPASS_SCRIPT}"
+          export GIT_ASKPASS="${ASKPASS_SCRIPT}"
+          export GIT_TERMINAL_PROMPT=0
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          PUSH_OK=0
+          for attempt in 1 2 3; do
+            git fetch --depth=1 origin main
+            git reset --hard origin/main
+            python3 precheck.py --merge-state "${LOCAL_STATE_SNAP}"
+
+            scan_repo_secrets
+            python3 -m json.tool state.json >/dev/null
+
+            git add -- state.json
+            if git diff --cached --name-only | grep -Ei "(^\.env|\.secret$)" >/dev/null 2>&1; then
+              echo "::error::Bloqueio de seguranca acionado: arquivo de segredo staged!"
+              exit 1
+            fi
+
+            if git diff --cached --quiet; then
+              echo "state.json ja esta sincronizado em main apos merge monotonico."
+              PUSH_OK=1
+              break
+            fi
+
             git commit -m "chore(precheck): atualizar marcador de partidas [skip ci]"
-            for attempt in 1 2 3; do
-              git pull --rebase -X theirs origin main || {
-                git rebase --abort 2>/dev/null || true
-              }
-              if git push origin "HEAD:main"; then
-                echo "state.json salvo com sucesso em main."
-                break
-              fi
-              sleep 2
-            done
+            if git push origin "HEAD:main"; then
+              echo "state.json salvo com sucesso em main (tentativa ${attempt}/3)."
+              PUSH_OK=1
+              break
+            fi
+            sleep $((attempt * 2))
+          done
+
+          if [ "${PUSH_OK}" -ne 1 ]; then
+            echo "::error::Falha ao persistir state.json em main apos 3 tentativas!"
+            exit 1
           fi
 
       - name: Auto-agendar proxima sessao autonoma de 60 min (Self-Relay via GITHUB_TOKEN efemero)
@@ -157,20 +218,31 @@ jobs:
             exit 1
           fi
 
-          # Dupla checagem anti-duplicidade: se ja houver outra sessao na fila/em andamento, nao empilha outra!
+          # Dupla checagem anti-duplicidade: inclui pending/requested para nao empilhar nem cancelar sessao ja na fila
           PENDING_COUNT="$(gh api 'repos/nigosky/coh3-br-scheduler/actions/workflows/scheduler.yml/runs?per_page=10' \
-            --jq '[.workflow_runs[] | select((.status == "queued" or .status == "in_progress" or .status == "waiting") and (.id != '"${GITHUB_RUN_ID}"'))] | length')"
+            --jq '[.workflow_runs[] | select((.status == "queued" or .status == "in_progress" or .status == "waiting" or .status == "pending" or .status == "requested") and (.id != '"${GITHUB_RUN_ID}"'))] | length')"
 
           if [ "${PENDING_COUNT:-0}" -gt 0 ]; then
             echo "Ja existe ${PENDING_COUNT} sessao pendente/em andamento; evitando disparo duplicado."
             exit 0
           fi
 
-          gh workflow run scheduler.yml \
-            --repo nigosky/coh3-br-scheduler \
-            --ref main \
-            -f force_dispatch=false \
-            -f auto_relay=true
+          RELAY_OK=0
+          for attempt in 1 2 3; do
+            if gh workflow run scheduler.yml \
+              --repo nigosky/coh3-br-scheduler \
+              --ref main \
+              -f force_dispatch=false \
+              -f auto_relay=true; then
+              RELAY_OK=1
+              break
+            fi
+            sleep $((attempt * 5))
+          done
+          if [ "${RELAY_OK}" -ne 1 ]; then
+            echo "::error::Falha ao agendar proxima sessao Self-Relay apos 3 tentativas."
+            exit 1
+          fi
           echo "Proxima sessao autonoma de 60 min agendada com sucesso via GITHUB_TOKEN efemero!"
 
       - name: Resumo da Sessao do Smart Scheduler
