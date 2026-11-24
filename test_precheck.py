@@ -335,6 +335,125 @@ class TestSchedulerSharedRoster(unittest.TestCase):
         self.assertEqual(code, 204)
         self.assertEqual(read_sizes, [1024])
 
+    def test_custom_match_triggers_two_wave_battlegroup_followup(self) -> None:
+        import json
+
+        self.assertIn(0, precheck.BG_ELIGIBLE_TYPE_IDS)
+        self.assertNotIn(5, precheck.BG_ELIGIBLE_TYPE_IDS)
+
+        now_ts = 1_795_540_000
+        precheck.MONITORED_PROFILES = ((79327, "Chacineiro"),)
+        precheck.MONITORED_PID_SET = frozenset({79327})
+
+        # 1) fetch_latest_player_marker deve capturar Custom (mt=0) e ignorar Co-Op (mt=5)
+        fake_history = {
+            "matchHistoryStats": [
+                {"id": 92719373, "completiontime": now_ts - 60, "matchtype_id": 0},
+                {"id": 92719999, "completiontime": now_ts - 30, "matchtype_id": 5},
+            ]
+        }
+
+        class _FakeResp:
+            def __enter__(self) -> _FakeResp:
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                return False
+
+        class _FakeOpener:
+            def open(self, req: object, timeout: int = 15) -> _FakeResp:
+                return _FakeResp()
+
+        with (
+            patch.object(precheck, "_get_opener", return_value=_FakeOpener()),
+            patch.object(precheck, "_read_bounded_json", return_value=fake_history),
+        ):
+            pid, max_mid, max_ct, ok_m, bg_mid, bg_ct = precheck.fetch_latest_player_marker(79327)
+        self.assertTrue(ok_m)
+        self.assertEqual(pid, 79327)
+        self.assertEqual(max_mid, 92719999)
+        self.assertEqual(bg_mid, 92719373)
+        self.assertEqual(bg_ct, now_ts - 60)
+
+        # 2) Ciclo completo 2 ondas: T=0 (nova Custom) -> Onda 1 (+5m) -> Onda 2 (+30m) -> encerrado
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "last_dispatch_ts": now_ts - 1800,
+                        "players": {"79327": {"max_match_id": 92700000, "max_completion_time": now_ts - 3600}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            # T=0: Nova Custom #92719373 -> agenda Onda 1
+            with (
+                patch.object(precheck.time, "time", return_value=now_ts),
+                patch.object(
+                    precheck,
+                    "fetch_latest_player_marker",
+                    return_value=(79327, 92719373, now_ts - 60, True, 92719373, now_ts - 60),
+                ),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=(set(), now_ts, True)),
+                patch.object(precheck, "dispatch_private_tracker", return_value=(True, 204)),
+            ):
+                disp0, ok0, _reason0, _meta0 = precheck.evaluate_precheck(
+                    state_path=state_path,
+                    dispatch_token="tok_valid_test",
+                )
+            self.assertTrue(disp0 and ok0)
+            st0 = precheck.load_state(state_path)
+            self.assertEqual(st0["pending_bg_followup_match_id"], 92719373)
+            self.assertEqual(st0["pending_bg_followup_wave"], 1)
+            self.assertEqual(st0["pending_bg_followup_due_ts"], now_ts + precheck.BG_FOLLOWUP_DELAY_SEC)
+
+            # T=+5m: Onda 1 dispara e agenda Onda 2 (+25m)
+            t_wave1 = now_ts + 300
+            with (
+                patch.object(precheck.time, "time", return_value=t_wave1),
+                patch.object(
+                    precheck,
+                    "fetch_latest_player_marker",
+                    return_value=(79327, 92719373, now_ts - 60, True, 92719373, now_ts - 60),
+                ),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=(set(), t_wave1, True)),
+                patch.object(precheck, "dispatch_private_tracker", return_value=(True, 204)),
+            ):
+                disp1, ok1, reason1, _meta1 = precheck.evaluate_precheck(
+                    state_path=state_path,
+                    dispatch_token="tok_valid_test",
+                )
+            self.assertTrue(disp1 and ok1)
+            self.assertIn("onda 1/2", reason1)
+            st1 = precheck.load_state(state_path)
+            self.assertEqual(st1["pending_bg_followup_wave"], 2)
+            self.assertEqual(st1["pending_bg_followup_due_ts"], t_wave1 + precheck.BG_FOLLOWUP_WAVE2_DELAY_SEC)
+
+            # T=+30m: Onda 2 dispara e limpa agendamento
+            t_wave2 = t_wave1 + precheck.BG_FOLLOWUP_WAVE2_DELAY_SEC + 30
+            with (
+                patch.object(precheck.time, "time", return_value=t_wave2),
+                patch.object(
+                    precheck,
+                    "fetch_latest_player_marker",
+                    return_value=(79327, 92719373, now_ts - 60, True, 92719373, now_ts - 60),
+                ),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=(set(), t_wave2, True)),
+                patch.object(precheck, "dispatch_private_tracker", return_value=(True, 204)),
+            ):
+                disp2, ok2, reason2, _meta2 = precheck.evaluate_precheck(
+                    state_path=state_path,
+                    dispatch_token="tok_valid_test",
+                )
+            self.assertTrue(disp2 and ok2)
+            self.assertIn("onda 2/2", reason2)
+            st2 = precheck.load_state(state_path)
+            self.assertEqual(st2["pending_bg_followup_wave"], 0)
+            self.assertEqual(st2["pending_bg_followup_due_ts"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
