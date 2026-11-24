@@ -93,7 +93,7 @@ def redact_secrets(text: Any) -> str:
     return AUTH_HEADER_REDACT_RE.sub(r"\1[AUTH_REDACTED]", scrubbed)
 
 
-# Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível (43 contas)
+# Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível (44 contas)
 FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (79327, "Chacineiro"),
     (1333418, "Charles Bronson (Smurf: Chacineiro)"),
@@ -138,6 +138,7 @@ FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (975688, "Kefbr"),
     (1390350, "TearsInTheRain (Smurf: Chacineiro)"),
     (1076221, "Lucielle (Smurf: Colossus)"),
+    (1119784, "Tracker"),
 )
 
 # Mapa fallback SteamID64 -> profile_id (permite consumir `last_steam_fast_sig[0]` do Radar sem usar chave Steam)
@@ -185,6 +186,7 @@ FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561197994245218": 975688,   # Kefbr
     "76561198089278659": 1390350,  # TearsInTheRain (Smurf: Chacineiro)
     "76561198815935562": 1076221,  # Lucielle (Smurf: Colossus)
+    "76561198000067932": 1119784,  # Tracker
 }
 
 # Contas secundárias mescladas preservadas quando a conta principal está no players_roster.json remoto (vazio: todas independentes)
