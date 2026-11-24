@@ -126,6 +126,7 @@ FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (1226910, "Lupus Alba"),
     (1005730, "arc"),
     (1423426, "geladeira velha (Smurf: arc)"),
+    (1487738, "Državljan H (Smurf: arc)"),
     (31145, "vonMises"),
     (58737, "INFIEL"),
     (431802, "Conflict.BR"),
@@ -174,6 +175,7 @@ FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561198140782132": 1226910,  # Lupus Alba
     "76561199791811246": 1005730,  # arc
     "76561199482388323": 1423426,  # geladeira velha (Smurf: arc)
+    "76561198602236177": 1487738,  # Državljan H (Smurf: arc)
     "76561197985268629": 31145,    # vonMises
     "76561197993922195": 58737,    # INFIEL
     "76561198000099422": 431802,   # Conflict.BR
