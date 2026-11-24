@@ -20,8 +20,8 @@ class TestSchedulerSharedRoster(unittest.TestCase):
         precheck._LAST_FETCHED_STEAM_ID_TO_PID = {}
 
     def test_fallback_profiles_and_steam_map_stay_aligned(self) -> None:
-        self.assertEqual(len(precheck.FALLBACK_MONITORED_PROFILES), 44)
-        self.assertEqual(len(precheck.FALLBACK_STEAM_ID_TO_PID), 44)
+        self.assertEqual(len(precheck.FALLBACK_MONITORED_PROFILES), 45)
+        self.assertEqual(len(precheck.FALLBACK_STEAM_ID_TO_PID), 45)
         self.assertEqual(precheck.LOCAL_MERGED_ACCOUNT_FALLBACKS, ())
         self.assertEqual(
             set(precheck.FALLBACK_STEAM_ID_TO_PID.values()),
@@ -34,6 +34,7 @@ class TestSchedulerSharedRoster(unittest.TestCase):
             1333418: ("76561198698969876", "Charles Bronson (Smurf: Chacineiro)"),
             557890: ("76561199538846112", "gabe44arg (Smurf: Gabe)"),
             1423426: ("76561199482388323", "geladeira velha (Smurf: arc)"),
+            1487738: ("76561198602236177", "Državljan H (Smurf: arc)"),
             1390350: ("76561198089278659", "TearsInTheRain (Smurf: Chacineiro)"),
             1076221: ("76561198815935562", "Lucielle (Smurf: Colossus)"),
         }
