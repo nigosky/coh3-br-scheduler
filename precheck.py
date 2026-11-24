@@ -3,14 +3,19 @@
 Pré-checagem inteligente (stdlib-only, TLS 1.2+) com loop contínuo de 5 min para `nigosky/coh3-br-scheduler`.
 
 Consulta diretamente a API pública da Relic (`getRecentMatchHistoryByProfileId`) das contas Steam
-monitoradas (sincronizadas da base compartilhada `players_roster.json`, com fallback embutido de 42 contas,
+monitoradas (sincronizadas da base compartilhada `players_roster.json`, com fallback embutido,
 cobrindo tanto Automatch ranqueadas quanto partidas Customizadas!) a cada 5 minutos durante uma sessão
-autônoma de 60 minutos (12 ciclos) e dispara (`workflow_dispatch`) o repositório privado
-`nigosky/coh3-br-tracker` imediatamente assim que qualquer partida nova termina!
+autônoma de 60 minutos (12 ciclos) e dispara (`workflow_dispatch`):
+- `nigosky/coh3-br-tracker` (`coh3_monitor.yml`) imediatamente assim que qualquer partida nova termina,
+  em janelas de confirmação de Battlegroups, Resumo Semanal ou heartbeat de 3h;
+- `nigosky/coh3-br-ranking`:
+  1. `boletim_diario.yml` (todo dia >= 08:03 BRT)
+  2. `ranking_unificado.yml` (2x/dia >= 00:02 BRT e >= 12:02 BRT, `{"force_update": false}`)
+  3. `campeoes_battlegroups.yml` (sábado >= 12:05 BRT, janela de recuperação até domingo 11:59 BRT)
 
 Resultado:
-- Detecção pontual a cada 5 minutos 24h/dia (sem sofrer com atrasos ou descartes do cron do GitHub Actions).
-- Minutos 100% gratuitos no agendador público, economizando ~80-90% da cota do repositório privado.
+- Detecção e agendamentos pontuais a cada 5 minutos 24h/dia (sem sofrer com atrasos ou descartes do cron do GitHub Actions).
+- Minutos 100% gratuitos no agendador público, economizando ~80-90% da cota dos repositórios privados.
 """
 
 from __future__ import annotations
@@ -35,7 +40,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-USER_AGENT = "CoH3-BR-SmartScheduler/2.4"
+USER_AGENT = "CoH3-BR-SmartScheduler/2.5"
 RELIC_HOST = "coh3-api.reliclink.com"
 GITHUB_API_HOST = "api.github.com"
 RADAR_HOST = "raw.githubusercontent.com"
@@ -44,6 +49,13 @@ RADAR_STATE_URL = f"https://{RADAR_HOST}{RADAR_STATE_PATH}"
 SHARED_ROSTER_PATH = "/nigosky/coh3-br-lobby-radar/main/players_roster.json"
 SHARED_ROSTER_URL = f"https://{RADAR_HOST}{SHARED_ROSTER_PATH}"
 BASE_URL = f"https://{RELIC_HOST}/community/leaderboard"
+RANKING_TARGET_OWNER = "nigosky"
+RANKING_TARGET_REPO = "coh3-br-ranking"
+RANKING_TARGET_REF = "main"
+RANKING_DAILY_WORKFLOW = "boletim_diario.yml"
+RANKING_UNIFIED_WORKFLOW = "ranking_unificado.yml"
+RANKING_BG_WORKFLOW = "campeoes_battlegroups.yml"
+RANKING_UNIFIED_INPUTS: dict[str, Any] = {"force_update": False}
 MAX_HTTP_BYTES = 5 * 1024 * 1024  # 5 MB limite estrito anti-Gzip-bomb
 MAX_RADAR_BYTES = 256 * 1024  # 256 KB limite estrito para state.json e players_roster.json
 RADAR_MAX_AGE_SEC = 7200  # Ignora estado do Radar se estiver há >2h sem sincronizar
@@ -70,7 +82,7 @@ WEBHOOK_REDACT_RE = re.compile(
     re.IGNORECASE,
 )
 TOKEN_ENV_REDACT_RE = re.compile(
-    r"((?:TRACKER_DISPATCH_TOKEN|GITHUB_TOKEN|GH_TOKEN|DISCORD_(?:LOBBY_)?WEBHOOK_URL|STEAM_WEB_API_KEY)\s*=\s*)[^\s\"'<>]+",
+    r"((?:TRACKER_DISPATCH_TOKEN|RANKING_DISPATCH_TOKEN|GITHUB_TOKEN|GH_TOKEN|DISCORD_(?:LOBBY_)?WEBHOOK_URL|STEAM_WEB_API_KEY)\s*=\s*)[^\s\"'<>]+",
     re.IGNORECASE,
 )
 STEAM_API_KEY_QUERY_REDACT_RE = re.compile(r"([?&]key=)[^&\s\"'<>]+", re.IGNORECASE)
@@ -91,6 +103,42 @@ def redact_secrets(text: Any) -> str:
     scrubbed = STEAM_API_KEY_QUERY_REDACT_RE.sub(r"\1[STEAM_KEY_REDACTED]", scrubbed)
     scrubbed = GITHUB_TOKEN_REDACT_RE.sub("[GH_TOKEN_REDACTED]", scrubbed)
     return AUTH_HEADER_REDACT_RE.sub(r"\1[AUTH_REDACTED]", scrubbed)
+
+
+def resolve_ranking_dispatch_token(ranking_token: str = "", tracker_token: str = "") -> str:
+    """Retorna RANKING_DISPATCH_TOKEN quando definido, com fallback automático para TRACKER_DISPATCH_TOKEN."""
+    clean_ranking = (ranking_token or "").strip()
+    if clean_ranking:
+        return clean_ranking
+    return (tracker_token or "").strip()
+
+
+def get_ranking_daily_date(now_brt: datetime) -> str:
+    """Retorna a data BRT (YYYY-MM-DD) do Boletim Diário + Jogo do Dia a partir das 08:03 BRT, ou '' antes da janela."""
+    if (now_brt.hour, now_brt.minute) >= (8, 3):
+        return now_brt.strftime("%Y-%m-%d")
+    return ""
+
+
+def get_ranking_unified_slot(now_brt: datetime) -> str:
+    """Retorna o slot 2x/dia do Ranking Unificado + Times 2v2 (00:02 BRT e 12:02 BRT), ou '' fora da janela."""
+    date_str = now_brt.strftime("%Y-%m-%d")
+    hm = (now_brt.hour, now_brt.minute)
+    if (0, 2) <= hm < (12, 0):
+        return f"{date_str}-00"
+    if hm >= (12, 2):
+        return f"{date_str}-12"
+    return ""
+
+
+def get_ranking_bg_slot(now_brt: datetime) -> str:
+    """Retorna o slot semanal ISO (YYYY-Www) de Campeões BR por Battlegroup (sáb >=12:05 até dom 11:59 BRT), ou ''."""
+    wd = now_brt.weekday()
+    hm = (now_brt.hour, now_brt.minute)
+    if (wd == 5 and hm >= (12, 5)) or (wd == 6 and hm <= (11, 59)):
+        iso_year, iso_week, _ = now_brt.isocalendar()
+        return f"{iso_year}-W{iso_week:02d}"
+    return ""
 
 
 # Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível (46 contas)
@@ -634,8 +682,9 @@ def dispatch_private_tracker(
     repo: str = "coh3-br-tracker",
     workflow: str = "coh3_monitor.yml",
     ref: str = "main",
+    inputs: dict[str, Any] | None = None,
 ) -> tuple[bool, int]:
-    """Dispara workflow_dispatch no repositório privado via HTTPS TLS 1.2+ sem expor segredos."""
+    """Dispara workflow_dispatch em repositório privado via HTTPS TLS 1.2+ sem expor segredos."""
     clean_token = (token or "").strip()
     if not clean_token:
         return False, 0
@@ -651,7 +700,21 @@ def dispatch_private_tracker(
     url = f"https://{GITHUB_API_HOST}/repos/{owner.strip()}/{repo.strip()}/actions/workflows/{workflow.strip()}/dispatches"
     _validate_outbound_https(url, GITHUB_API_HOST, path_prefix="/repos/", allow_query=False)
 
-    body = json.dumps({"ref": clean_ref}).encode("utf-8")
+    payload_obj: dict[str, Any] = {"ref": clean_ref}
+    if inputs is not None:
+        if not isinstance(inputs, dict) or len(inputs) > 25:
+            raise ValueError("Parâmetro GitHub inválido (inputs).")
+        clean_inputs: dict[str, Any] = {}
+        for key, val in inputs.items():
+            k = str(key or "").strip()
+            if not k or not SAFE_GH_SEGMENT_RE.fullmatch(k):
+                raise ValueError(f"Chave de input GitHub inválida ({k!r}).")
+            if not isinstance(val, (str, bool, int, float)):
+                raise ValueError(f"Tipo de input GitHub inválido para {k!r}.")
+            clean_inputs[k] = val
+        payload_obj["inputs"] = clean_inputs
+
+    body = json.dumps(payload_obj).encode("utf-8")
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/vnd.github+json",
@@ -675,6 +738,8 @@ def dispatch_private_tracker(
                 exc.read(1024)
             except Exception:
                 pass
+            if last_code in (400, 401, 403, 404, 422):
+                break
         except Exception:
             last_code = 0
 
@@ -682,6 +747,110 @@ def dispatch_private_tracker(
             time.sleep(attempt * 3)
 
     return False, last_code
+
+
+def evaluate_ranking_dispatches(
+    now_brt: datetime,
+    prev_state: dict[str, Any],
+    ranking_token: str = "",
+    tracker_token: str = "",
+    dry_run: bool = False,
+    owner: str = RANKING_TARGET_OWNER,
+    repo: str = RANKING_TARGET_REPO,
+    ref: str = RANKING_TARGET_REF,
+    daily_workflow: str = RANKING_DAILY_WORKFLOW,
+    unified_workflow: str = RANKING_UNIFIED_WORKFLOW,
+    bg_workflow: str = RANKING_BG_WORKFLOW,
+) -> tuple[dict[str, str], list[dict[str, Any]], bool]:
+    """
+    Avalia e dispara os 3 workflows agendados de `nigosky/coh3-br-ranking`:
+    1. Boletim Diário + Jogo do Dia (`boletim_diario.yml`) >= 08:03 BRT (`last_ranking_daily_date`)
+    2. Ranking Unificado + Times 2v2 (`ranking_unificado.yml`) >= 00:02 e >= 12:02 BRT (`last_ranking_slot`)
+    3. Campeões BR por Battlegroup (`campeoes_battlegroups.yml`) sáb >= 12:05 até dom 11:59 BRT (`last_ranking_bg_slot`)
+
+    Retorna `(next_markers, events, state_changed)`.
+    Cada marcador só avança se o respectivo disparo retornar HTTP 204 (ou em `dry_run`, sem persistir em disco).
+    """
+    markers: dict[str, str] = {
+        "last_ranking_daily_date": str(prev_state.get("last_ranking_daily_date") or ""),
+        "last_ranking_slot": str(prev_state.get("last_ranking_slot") or ""),
+        "last_ranking_bg_slot": str(prev_state.get("last_ranking_bg_slot") or ""),
+    }
+    schedule_specs: tuple[tuple[str, str, str, str, dict[str, Any] | None], ...] = (
+        (
+            "last_ranking_daily_date",
+            "Boletim Diario + Jogo do Dia",
+            daily_workflow,
+            get_ranking_daily_date(now_brt),
+            None,
+        ),
+        (
+            "last_ranking_slot",
+            "Ranking Unificado + Times 2v2",
+            unified_workflow,
+            get_ranking_unified_slot(now_brt),
+            dict(RANKING_UNIFIED_INPUTS),
+        ),
+        (
+            "last_ranking_bg_slot",
+            "Campeoes BR por Battlegroup",
+            bg_workflow,
+            get_ranking_bg_slot(now_brt),
+            None,
+        ),
+    )
+
+    clean_ranking_token = (ranking_token or "").strip()
+    clean_tracker_token = (tracker_token or "").strip()
+    effective_token = resolve_ranking_dispatch_token(clean_ranking_token, clean_tracker_token)
+    if clean_ranking_token:
+        token_source = "RANKING_DISPATCH_TOKEN"
+    elif clean_tracker_token:
+        token_source = "TRACKER_DISPATCH_TOKEN (fallback)"
+    else:
+        token_source = "AUSENTE"
+
+    events: list[dict[str, Any]] = []
+    state_changed = False
+
+    for marker_key, label, workflow, target_slot, inputs in schedule_specs:
+        if not target_slot or markers[marker_key] == target_slot:
+            continue
+
+        if dry_run:
+            ok, http_code = True, 204
+        elif effective_token:
+            ok, http_code = dispatch_private_tracker(
+                token=effective_token,
+                owner=owner,
+                repo=repo,
+                workflow=workflow,
+                ref=ref,
+                inputs=inputs,
+            )
+        else:
+            ok, http_code = False, 0
+
+        events.append(
+            {
+                "marker_key": marker_key,
+                "label": label,
+                "owner": owner,
+                "repo": repo,
+                "workflow": workflow,
+                "ref": ref,
+                "slot": target_slot,
+                "inputs": dict(inputs) if inputs is not None else None,
+                "ok": ok,
+                "http_code": http_code,
+                "token_source": token_source,
+            }
+        )
+        if ok:
+            markers[marker_key] = target_slot
+            state_changed = True
+
+    return markers, events, state_changed
 
 
 def load_state(state_path: Path) -> dict[str, Any]:
@@ -740,11 +909,21 @@ def evaluate_precheck(
     target_ref: str = "main",
     prev_radar_pids_override: set[int] | None = None,
     last_full_stat_audit_ts_override: int | None = None,
+    ranking_token: str = "",
+    ranking_owner: str = RANKING_TARGET_OWNER,
+    ranking_repo: str = RANKING_TARGET_REPO,
+    ranking_ref: str = RANKING_TARGET_REF,
+    ranking_daily_workflow: str = RANKING_DAILY_WORKFLOW,
+    ranking_unified_workflow: str = RANKING_UNIFIED_WORKFLOW,
+    ranking_bg_workflow: str = RANKING_BG_WORKFLOW,
 ) -> tuple[bool, bool, str, dict[str, Any]]:
     """
-    Executa 1 ciclo de pré-checagem (Relic History + Radar dos Veteranos + Relic PersonalStat + Auditoria de Silêncio 1h).
+    Executa 1 ciclo de pré-checagem (Relic History + Radar dos Veteranos + Relic PersonalStat + Auditoria de Silêncio 1h)
+    e avalia o agendamento dos workflows de `nigosky/coh3-br-ranking`.
     Retorna `(should_dispatch, dispatched_ok, reason_str, meta)`.
-    Importante: só avança `state.json` se `dispatched_ok` for True (evita perder partidas caso o dispatch falhe).
+    Importante:
+    - Só avança marcadores do tracker se `dispatched_ok` for True (evita perder partidas caso o dispatch falhe).
+    - Persiste `state.json` mesmo em ciclos sem disparo do tracker quando algum workflow de ranking é disparado com sucesso.
     """
     now_ts = int(time.time())
     now_brt = datetime.fromtimestamp(now_ts, tz=BRT_TZ)
@@ -944,37 +1123,68 @@ def evaluate_precheck(
             dispatched_ok = False
             http_code = 0
 
-    if should_dispatch and dispatched_ok and not dry_run:
-        if fresh_automatch_mid > 0 or radar_stat_triggers or quiet_stat_triggers:
-            next_bg_due_ts = now_ts + BG_FOLLOWUP_DELAY_SEC
-            next_bg_mid = fresh_automatch_mid
-            next_bg_wave = 1
-        elif bg_followup_due and active_bg_wave == 1:
-            next_bg_due_ts = now_ts + BG_FOLLOWUP_WAVE2_DELAY_SEC
-            next_bg_mid = prev_bg_match_id
-            next_bg_wave = 2
-        elif prev_bg_due_ts > 0 and now_ts < (prev_bg_due_ts - 60):
-            next_bg_due_ts = prev_bg_due_ts
-            next_bg_mid = prev_bg_match_id
-            next_bg_wave = active_bg_wave
-        else:
-            next_bg_due_ts = 0
-            next_bg_mid = 0
-            next_bg_wave = 0
-        next_state = {
-            "schema_version": 2,
-            "last_checked_ts": now_ts,
-            "last_dispatch_ts": now_ts,
-            "last_full_stat_audit_ts": now_ts if run_full_stat_audit else prev_full_audit_ts,
-            "last_weekly_summary_iso_week": current_iso_week if mark_weekly_done else last_weekly_week,
-            "pending_bg_followup_due_ts": next_bg_due_ts,
-            "pending_bg_followup_match_id": next_bg_mid,
-            "pending_bg_followup_wave": next_bg_wave,
-            "radar_coh3_pids": sorted(curr_radar_pids) if radar_ok else sorted(prev_radar_pids),
-            "radar_last_sync_ts": radar_sync_ts if radar_ok else int(prev.get("radar_last_sync_ts", 0) or 0),
-            "players": updated_players,
-        }
-        atomic_write_json(state_path, next_state)
+    ranking_markers, ranking_events, ranking_state_changed = evaluate_ranking_dispatches(
+        now_brt=now_brt,
+        prev_state=prev,
+        ranking_token=ranking_token,
+        tracker_token=dispatch_token,
+        dry_run=dry_run,
+        owner=ranking_owner,
+        repo=ranking_repo,
+        ref=ranking_ref,
+        daily_workflow=ranking_daily_workflow,
+        unified_workflow=ranking_unified_workflow,
+        bg_workflow=ranking_bg_workflow,
+    )
+
+    state_persisted = False
+    tracker_state_changed = bool(should_dispatch and dispatched_ok)
+    if not dry_run:
+        if tracker_state_changed:
+            if fresh_automatch_mid > 0 or radar_stat_triggers or quiet_stat_triggers:
+                next_bg_due_ts = now_ts + BG_FOLLOWUP_DELAY_SEC
+                next_bg_mid = fresh_automatch_mid
+                next_bg_wave = 1
+            elif bg_followup_due and active_bg_wave == 1:
+                next_bg_due_ts = now_ts + BG_FOLLOWUP_WAVE2_DELAY_SEC
+                next_bg_mid = prev_bg_match_id
+                next_bg_wave = 2
+            elif prev_bg_due_ts > 0 and now_ts < (prev_bg_due_ts - 60):
+                next_bg_due_ts = prev_bg_due_ts
+                next_bg_mid = prev_bg_match_id
+                next_bg_wave = active_bg_wave
+            else:
+                next_bg_due_ts = 0
+                next_bg_mid = 0
+                next_bg_wave = 0
+            next_state = {
+                "schema_version": 2,
+                "last_checked_ts": now_ts,
+                "last_dispatch_ts": now_ts,
+                "last_full_stat_audit_ts": now_ts if run_full_stat_audit else prev_full_audit_ts,
+                "last_weekly_summary_iso_week": current_iso_week if mark_weekly_done else last_weekly_week,
+                "last_ranking_daily_date": ranking_markers["last_ranking_daily_date"],
+                "last_ranking_slot": ranking_markers["last_ranking_slot"],
+                "last_ranking_bg_slot": ranking_markers["last_ranking_bg_slot"],
+                "pending_bg_followup_due_ts": next_bg_due_ts,
+                "pending_bg_followup_match_id": next_bg_mid,
+                "pending_bg_followup_wave": next_bg_wave,
+                "radar_coh3_pids": sorted(curr_radar_pids) if radar_ok else sorted(prev_radar_pids),
+                "radar_last_sync_ts": radar_sync_ts if radar_ok else int(prev.get("radar_last_sync_ts", 0) or 0),
+                "players": updated_players,
+            }
+            atomic_write_json(state_path, next_state)
+            state_persisted = True
+        elif ranking_state_changed:
+            # Persiste marcadores de ranking mesmo em ciclos sem disparo do tracker, preservando estado do tracker intacto
+            next_state = dict(prev)
+            next_state["schema_version"] = int(prev.get("schema_version", 2) or 2)
+            next_state["last_checked_ts"] = now_ts
+            next_state["last_ranking_daily_date"] = ranking_markers["last_ranking_daily_date"]
+            next_state["last_ranking_slot"] = ranking_markers["last_ranking_slot"]
+            next_state["last_ranking_bg_slot"] = ranking_markers["last_ranking_bg_slot"]
+            atomic_write_json(state_path, next_state)
+            state_persisted = True
 
     meta = {
         "ok_accounts": ok_count,
@@ -985,6 +1195,10 @@ def evaluate_precheck(
         "radar_exited_pids": sorted(exited_radar_pids),
         "full_stat_audit_ran": run_full_stat_audit,
         "full_stat_audit_ts": now_ts if run_full_stat_audit else prev_full_audit_ts,
+        "ranking_dispatches": ranking_events,
+        "ranking_dispatches_ok": sum(1 for ev in ranking_events if ev["ok"]),
+        "ranking_dispatches_failed": sum(1 for ev in ranking_events if not ev["ok"]),
+        "state_persisted": state_persisted,
     }
     return should_dispatch, dispatched_ok, reason_str, meta
 
@@ -1005,10 +1219,24 @@ def main() -> int:
     force_first = args.force or (os.environ.get("FORCE_DISPATCH", "false").strip().lower() == "true")
 
     dispatch_token = os.environ.get("TRACKER_DISPATCH_TOKEN", "").strip()
+    ranking_token = os.environ.get("RANKING_DISPATCH_TOKEN", "").strip()
     target_owner = os.environ.get("TARGET_OWNER", "nigosky").strip() or "nigosky"
     target_repo = os.environ.get("TARGET_REPO", "coh3-br-tracker").strip() or "coh3-br-tracker"
     target_workflow = os.environ.get("TARGET_WORKFLOW", "coh3_monitor.yml").strip() or "coh3_monitor.yml"
     target_ref = os.environ.get("TARGET_REF", "main").strip() or "main"
+
+    ranking_owner = os.environ.get("RANKING_TARGET_OWNER", RANKING_TARGET_OWNER).strip() or RANKING_TARGET_OWNER
+    ranking_repo = os.environ.get("RANKING_TARGET_REPO", RANKING_TARGET_REPO).strip() or RANKING_TARGET_REPO
+    ranking_ref = os.environ.get("RANKING_TARGET_REF", RANKING_TARGET_REF).strip() or RANKING_TARGET_REF
+    ranking_daily_workflow = (
+        os.environ.get("RANKING_DAILY_WORKFLOW", RANKING_DAILY_WORKFLOW).strip() or RANKING_DAILY_WORKFLOW
+    )
+    ranking_unified_workflow = (
+        os.environ.get("RANKING_UNIFIED_WORKFLOW", RANKING_UNIFIED_WORKFLOW).strip() or RANKING_UNIFIED_WORKFLOW
+    )
+    ranking_bg_workflow = (
+        os.environ.get("RANKING_BG_WORKFLOW", RANKING_BG_WORKFLOW).strip() or RANKING_BG_WORKFLOW
+    )
 
     if not args.dry_run and not dispatch_token:
         print(
@@ -1018,6 +1246,7 @@ def main() -> int:
         return 1
 
     total_dispatches = 0
+    total_ranking_dispatches = 0
     total_skips = 0
     last_ok_str = f"0/{len(MONITORED_PROFILES)}"
     dispatch_events: list[str] = []
@@ -1046,6 +1275,13 @@ def main() -> int:
             target_ref=target_ref,
             prev_radar_pids_override=mem_radar_pids,
             last_full_stat_audit_ts_override=mem_last_full_stat_audit_ts,
+            ranking_token=ranking_token,
+            ranking_owner=ranking_owner,
+            ranking_repo=ranking_repo,
+            ranking_ref=ranking_ref,
+            ranking_daily_workflow=ranking_daily_workflow,
+            ranking_unified_workflow=ranking_unified_workflow,
+            ranking_bg_workflow=ranking_bg_workflow,
         )
         if meta.get("radar_ok"):
             mem_radar_pids = set(meta.get("radar_active_pids") or [])
@@ -1059,22 +1295,51 @@ def main() -> int:
                 total_dispatches += 1
                 dispatch_events.append(f"[{now_brt_str}] {reason}")
                 print(
-                    f"[CICLO {idx}/{cycles} • {now_brt_str}] DISPARADO (HTTP {meta['http_code']}) -> "
-                    f"{target_owner}/{target_repo}@{target_ref} | Contas OK={last_ok_str} | {radar_tag} | Motivo: {reason}",
+                    redact_secrets(
+                        f"[CICLO {idx}/{cycles} • {now_brt_str}] DISPARADO (HTTP {meta['http_code']}) -> "
+                        f"{target_owner}/{target_repo}@{target_ref} | Contas OK={last_ok_str} | {radar_tag} | Motivo: {reason}"
+                    ),
                     flush=True,
                 )
             else:
                 print(
-                    f"::warning::[CICLO {idx}/{cycles} • {now_brt_str}] Falha ao disparar {target_owner}/{target_repo} "
-                    f"(HTTP {meta['http_code']}); estado preservado para retentativa no proximo ciclo! | {radar_tag} | Motivo: {reason}",
+                    redact_secrets(
+                        f"::warning::[CICLO {idx}/{cycles} • {now_brt_str}] Falha ao disparar {target_owner}/{target_repo} "
+                        f"(HTTP {meta['http_code']}); estado preservado para retentativa no proximo ciclo! | {radar_tag} | Motivo: {reason}"
+                    ),
                     flush=True,
                 )
         else:
             total_skips += 1
             print(
-                f"[CICLO {idx}/{cycles} • {now_brt_str}] ECONOMIZADO (SKIP) | Contas OK={last_ok_str} | {radar_tag} | {reason}",
+                redact_secrets(
+                    f"[CICLO {idx}/{cycles} • {now_brt_str}] ECONOMIZADO (SKIP) | Contas OK={last_ok_str} | {radar_tag} | {reason}"
+                ),
                 flush=True,
             )
+
+        for ev in meta.get("ranking_dispatches") or []:
+            if ev["ok"]:
+                total_ranking_dispatches += 1
+                dispatch_events.append(f"[{now_brt_str}] Ranking: {ev['label']} ({ev['workflow']}, slot={ev['slot']})")
+                print(
+                    redact_secrets(
+                        f"[CICLO {idx}/{cycles} • {now_brt_str}] RANKING DISPARADO (HTTP {ev['http_code']}) -> "
+                        f"{ev['owner']}/{ev['repo']}/{ev['workflow']}@{ev['ref']} | Slot={ev['slot']} | "
+                        f"Token={ev['token_source']} | {ev['label']}"
+                    ),
+                    flush=True,
+                )
+            else:
+                print(
+                    redact_secrets(
+                        f"::warning::[CICLO {idx}/{cycles} • {now_brt_str}] Falha ao disparar "
+                        f"{ev['owner']}/{ev['repo']}/{ev['workflow']} (HTTP {ev['http_code']}, "
+                        f"Token={ev['token_source']}); marcador {ev['marker_key']} preservado para retentativa "
+                        f"no proximo ciclo! | Slot={ev['slot']} | {ev['label']}"
+                    ),
+                    flush=True,
+                )
 
         if idx < cycles:
             elapsed = time.monotonic() - cycle_start
@@ -1090,6 +1355,7 @@ def main() -> int:
         {
             "total_cycles": str(cycles),
             "dispatches_count": str(total_dispatches),
+            "ranking_dispatches_count": str(total_ranking_dispatches),
             "skips_count": str(total_skips),
             "ok_accounts": last_ok_str,
             "summary_reason": summary_reason,

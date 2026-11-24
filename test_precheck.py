@@ -461,6 +461,523 @@ class TestSchedulerSharedRoster(unittest.TestCase):
             self.assertEqual(st2["pending_bg_followup_wave"], 0)
             self.assertEqual(st2["pending_bg_followup_due_ts"], 0)
 
+    def test_dispatch_private_tracker_serializes_optional_inputs_and_stops_on_4xx(self) -> None:
+        import json
+
+        captured_bodies: list[dict[str, object]] = []
+        captured_urls: list[str] = []
+
+        class _FakeResp:
+            def __enter__(self) -> _FakeResp:
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                return False
+
+            def getcode(self) -> int:
+                return 204
+
+            def read(self, n: int = -1) -> bytes:
+                return b""
+
+        class _FakeOpener:
+            def open(self, req: object, timeout: int = 20) -> _FakeResp:
+                captured_urls.append(getattr(req, "full_url", ""))
+                captured_bodies.append(json.loads(getattr(req, "data", b"{}").decode("utf-8")))
+                return _FakeResp()
+
+        with patch.object(precheck, "_get_opener", return_value=_FakeOpener()):
+            ok1, code1 = precheck.dispatch_private_tracker(
+                token="tok_valid",
+                owner="nigosky",
+                repo="coh3-br-ranking",
+                workflow="ranking_unificado.yml",
+                ref="main",
+                inputs={"force_update": False},
+            )
+            ok2, code2 = precheck.dispatch_private_tracker(
+                token="tok_valid",
+                owner="nigosky",
+                repo="coh3-br-ranking",
+                workflow="boletim_diario.yml",
+                ref="main",
+            )
+
+        self.assertTrue(ok1 and code1 == 204)
+        self.assertTrue(ok2 and code2 == 204)
+        self.assertEqual(
+            captured_urls,
+            [
+                "https://api.github.com/repos/nigosky/coh3-br-ranking/actions/workflows/ranking_unificado.yml/dispatches",
+                "https://api.github.com/repos/nigosky/coh3-br-ranking/actions/workflows/boletim_diario.yml/dispatches",
+            ],
+        )
+        self.assertEqual(captured_bodies[0], {"ref": "main", "inputs": {"force_update": False}})
+        self.assertEqual(captured_bodies[1], {"ref": "main"})
+
+        # HTTP 403 nao deve repetir 3x com backoff desnecessario
+        attempts = 0
+
+        class _Fake403Opener:
+            def open(self, req: object, timeout: int = 20) -> object:
+                nonlocal attempts
+                attempts += 1
+                raise urllib.error.HTTPError(getattr(req, "full_url", ""), 403, "Forbidden", {}, None)
+
+        with (
+            patch.object(precheck, "_get_opener", return_value=_Fake403Opener()),
+            patch.object(precheck.time, "sleep") as mock_sleep,
+        ):
+            ok_err, code_err = precheck.dispatch_private_tracker(
+                token="tok_valid",
+                owner="nigosky",
+                repo="coh3-br-ranking",
+                workflow="boletim_diario.yml",
+            )
+        self.assertFalse(ok_err)
+        self.assertEqual(code_err, 403)
+        self.assertEqual(attempts, 1)
+        mock_sleep.assert_not_called()
+
+    def test_ranking_daily_boletim_schedule_and_persistence_without_tracker_dispatch(self) -> None:
+        import json
+        from datetime import datetime
+
+        def _brt_ts(y: int, m: int, d: int, hh: int, mm: int) -> int:
+            return int(datetime(y, m, d, hh, mm, 0, tzinfo=precheck.BRT_TZ).timestamp())
+
+        precheck.MONITORED_PROFILES = ((79327, "Chacineiro"),)
+        precheck.MONITORED_PID_SET = frozenset({79327})
+
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "state.json"
+            t_0802 = _brt_ts(2026, 11, 24, 8, 2)
+            base_state = {
+                "schema_version": 2,
+                "last_checked_ts": t_0802 - 300,
+                "last_dispatch_ts": t_0802 - 600,
+                "last_full_stat_audit_ts": t_0802 - 600,
+                "last_weekly_summary_iso_week": "2026-W48",
+                "last_ranking_slot": "2026-11-24-00",
+                "pending_bg_followup_due_ts": 0,
+                "pending_bg_followup_match_id": 0,
+                "pending_bg_followup_wave": 0,
+                "radar_coh3_pids": [],
+                "radar_last_sync_ts": t_0802 - 300,
+                "players": {"79327": {"max_match_id": 500, "max_completion_time": t_0802 - 3600}},
+            }
+            state_path.write_text(json.dumps(base_state), encoding="utf-8")
+
+            # 08:02 BRT -> antes da janela (08:03): nao dispara nem grava state.json
+            with (
+                patch.object(precheck.time, "time", return_value=t_0802),
+                patch.object(
+                    precheck,
+                    "fetch_latest_player_marker",
+                    return_value=(79327, 500, t_0802 - 3600, True, 500, t_0802 - 3600),
+                ),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=(set(), t_0802, True)),
+                patch.object(precheck, "dispatch_private_tracker", return_value=(True, 204)) as mock_disp,
+            ):
+                should_disp, _, _, meta = precheck.evaluate_precheck(
+                    state_path=state_path,
+                    dispatch_token="tok_tracker",
+                )
+            self.assertFalse(should_disp)
+            self.assertFalse(meta["state_persisted"])
+            self.assertEqual(meta["ranking_dispatches"], [])
+            mock_disp.assert_not_called()
+
+            # 08:03 BRT (terca) -> tracker fica em SKIP, mas boletim_diario.yml dispara e persiste state.json!
+            t_0803 = _brt_ts(2026, 11, 24, 8, 3)
+            with (
+                patch.object(precheck.time, "time", return_value=t_0803),
+                patch.object(
+                    precheck,
+                    "fetch_latest_player_marker",
+                    return_value=(79327, 500, t_0802 - 3600, True, 500, t_0802 - 3600),
+                ),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=(set(), t_0803, True)),
+                patch.object(precheck, "dispatch_private_tracker", return_value=(True, 204)) as mock_disp,
+            ):
+                should_disp2, _, _, meta2 = precheck.evaluate_precheck(
+                    state_path=state_path,
+                    dispatch_token="tok_tracker",
+                )
+            self.assertFalse(should_disp2)
+            self.assertTrue(meta2["state_persisted"])
+            self.assertEqual(meta2["ranking_dispatches_ok"], 1)
+            mock_disp.assert_called_once_with(
+                token="tok_tracker",
+                owner="nigosky",
+                repo="coh3-br-ranking",
+                workflow="boletim_diario.yml",
+                ref="main",
+                inputs=None,
+            )
+            saved = precheck.load_state(state_path)
+            self.assertEqual(saved["last_ranking_daily_date"], "2026-11-24")
+            self.assertEqual(saved["last_ranking_slot"], "2026-11-24-00")
+            # Estado do tracker deve permanecer intacto (nao sobrescreveu last_dispatch_ts nem players)
+            self.assertEqual(saved["last_dispatch_ts"], t_0802 - 600)
+            self.assertEqual(saved["players"]["79327"]["max_match_id"], 500)
+            self.assertEqual(saved["last_weekly_summary_iso_week"], "2026-W48")
+
+            # 08:08 BRT (mesmo dia) -> idempotente, nao dispara novamente
+            t_0808 = _brt_ts(2026, 11, 24, 8, 8)
+            with (
+                patch.object(precheck.time, "time", return_value=t_0808),
+                patch.object(
+                    precheck,
+                    "fetch_latest_player_marker",
+                    return_value=(79327, 500, t_0802 - 3600, True, 500, t_0802 - 3600),
+                ),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=(set(), t_0808, True)),
+                patch.object(precheck, "dispatch_private_tracker", return_value=(True, 204)) as mock_disp_skip,
+            ):
+                _, _, _, meta3 = precheck.evaluate_precheck(
+                    state_path=state_path,
+                    dispatch_token="tok_tracker",
+                )
+            self.assertEqual(meta3["ranking_dispatches"], [])
+            self.assertFalse(meta3["state_persisted"])
+            mock_disp_skip.assert_not_called()
+
+    def test_ranking_unified_twice_daily_slots_and_force_update_false_input(self) -> None:
+        import json
+        from datetime import datetime
+
+        def _brt_dt(y: int, m: int, d: int, hh: int, mm: int) -> datetime:
+            return datetime(y, m, d, hh, mm, 0, tzinfo=precheck.BRT_TZ)
+
+        self.assertEqual(precheck.get_ranking_unified_slot(_brt_dt(2026, 11, 24, 0, 1)), "")
+        self.assertEqual(precheck.get_ranking_unified_slot(_brt_dt(2026, 11, 24, 0, 2)), "2026-11-24-00")
+        self.assertEqual(precheck.get_ranking_unified_slot(_brt_dt(2026, 11, 24, 11, 59)), "2026-11-24-00")
+        self.assertEqual(precheck.get_ranking_unified_slot(_brt_dt(2026, 11, 24, 12, 0)), "")
+        self.assertEqual(precheck.get_ranking_unified_slot(_brt_dt(2026, 11, 24, 12, 1)), "")
+        self.assertEqual(precheck.get_ranking_unified_slot(_brt_dt(2026, 11, 24, 12, 2)), "2026-11-24-12")
+        self.assertEqual(precheck.get_ranking_unified_slot(_brt_dt(2026, 11, 24, 23, 59)), "2026-11-24-12")
+
+        precheck.MONITORED_PROFILES = ((79327, "Chacineiro"),)
+        precheck.MONITORED_PID_SET = frozenset({79327})
+
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "state.json"
+            t_0002 = int(_brt_dt(2026, 11, 24, 0, 2).timestamp())
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "last_dispatch_ts": t_0002 - 600,
+                        "last_ranking_daily_date": "2026-11-24",
+                        "players": {"79327": {"max_match_id": 500, "max_completion_time": t_0002 - 3600}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            # 00:02 BRT -> dispara slot 00 com inputs {"force_update": false} e salva sem disparo do tracker
+            with (
+                patch.object(precheck.time, "time", return_value=t_0002),
+                patch.object(
+                    precheck,
+                    "fetch_latest_player_marker",
+                    return_value=(79327, 500, t_0002 - 3600, True, 500, t_0002 - 3600),
+                ),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=(set(), t_0002, True)),
+                patch.object(precheck, "dispatch_private_tracker", return_value=(True, 204)) as mock_disp1,
+            ):
+                should_disp1, _, _, meta1 = precheck.evaluate_precheck(
+                    state_path=state_path,
+                    dispatch_token="tok_tracker",
+                )
+            self.assertFalse(should_disp1)
+            self.assertTrue(meta1["state_persisted"])
+            mock_disp1.assert_called_once_with(
+                token="tok_tracker",
+                owner="nigosky",
+                repo="coh3-br-ranking",
+                workflow="ranking_unificado.yml",
+                ref="main",
+                inputs={"force_update": False},
+            )
+            self.assertEqual(precheck.load_state(state_path)["last_ranking_slot"], "2026-11-24-00")
+
+            # 12:02 BRT -> dispara slot 12 com inputs {"force_update": false}
+            t_1202 = int(_brt_dt(2026, 11, 24, 12, 2).timestamp())
+            st_mid = precheck.load_state(state_path)
+            st_mid["last_dispatch_ts"] = t_1202 - 600  # mantem tracker em SKIP (sem heartbeat 3h)
+            precheck.atomic_write_json(state_path, st_mid)
+
+            with (
+                patch.object(precheck.time, "time", return_value=t_1202),
+                patch.object(
+                    precheck,
+                    "fetch_latest_player_marker",
+                    return_value=(79327, 500, t_0002 - 3600, True, 500, t_0002 - 3600),
+                ),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=(set(), t_1202, True)),
+                patch.object(precheck, "dispatch_private_tracker", return_value=(True, 204)) as mock_disp2,
+            ):
+                should_disp2, _, _, meta2 = precheck.evaluate_precheck(
+                    state_path=state_path,
+                    dispatch_token="tok_tracker",
+                )
+            self.assertFalse(should_disp2)
+            self.assertTrue(meta2["state_persisted"])
+            mock_disp2.assert_called_once_with(
+                token="tok_tracker",
+                owner="nigosky",
+                repo="coh3-br-ranking",
+                workflow="ranking_unificado.yml",
+                ref="main",
+                inputs={"force_update": False},
+            )
+            self.assertEqual(precheck.load_state(state_path)["last_ranking_slot"], "2026-11-24-12")
+
+    def test_ranking_battlegroup_champions_saturday_and_sunday_recovery_window(self) -> None:
+        from datetime import datetime
+
+        def _brt_dt(y: int, m: int, d: int, hh: int, mm: int) -> datetime:
+            return datetime(y, m, d, hh, mm, 0, tzinfo=precheck.BRT_TZ)
+
+        # Sexta 2026-11-27 23:59 -> fora
+        self.assertEqual(precheck.get_ranking_bg_slot(_brt_dt(2026, 11, 27, 23, 59)), "")
+        # Sabado 2026-11-28 12:04 -> antes das 12:05
+        self.assertEqual(precheck.get_ranking_bg_slot(_brt_dt(2026, 11, 28, 12, 4)), "")
+        # Sabado 2026-11-28 12:05 -> abre slot semanal ISO 2026-W48
+        self.assertEqual(precheck.get_ranking_bg_slot(_brt_dt(2026, 11, 28, 12, 5)), "2026-W48")
+        # Domingo 2026-11-29 11:59 -> mesmo slot ISO 2026-W48 (janela de recuperacao)
+        self.assertEqual(precheck.get_ranking_bg_slot(_brt_dt(2026, 11, 29, 11, 59)), "2026-W48")
+        # Domingo 2026-11-29 12:00 -> janela de recuperacao encerrada
+        self.assertEqual(precheck.get_ranking_bg_slot(_brt_dt(2026, 11, 29, 12, 0)), "")
+
+        # Sabado 12:05 dispara e grava last_ranking_bg_slot; domingo 10:00 nao duplica
+        prev_sat = {
+            "last_ranking_daily_date": "2026-11-28",
+            "last_ranking_slot": "2026-11-28-12",
+            "last_ranking_bg_slot": "2026-W47",
+        }
+        with patch.object(precheck, "dispatch_private_tracker", return_value=(True, 204)) as mock_sat:
+            markers_sat, events_sat, changed_sat = precheck.evaluate_ranking_dispatches(
+                now_brt=_brt_dt(2026, 11, 28, 12, 5),
+                prev_state=prev_sat,
+                tracker_token="tok_tracker",
+            )
+        self.assertTrue(changed_sat)
+        self.assertEqual(markers_sat["last_ranking_bg_slot"], "2026-W48")
+        self.assertEqual(len(events_sat), 1)
+        mock_sat.assert_called_once_with(
+            token="tok_tracker",
+            owner="nigosky",
+            repo="coh3-br-ranking",
+            workflow="campeoes_battlegroups.yml",
+            ref="main",
+            inputs=None,
+        )
+
+        # Domingo 10:00 com marcador 2026-W48 ja salvo -> nao duplica
+        prev_sun_done = {
+            "last_ranking_daily_date": "2026-11-29",
+            "last_ranking_slot": "2026-11-29-00",
+            "last_ranking_bg_slot": "2026-W48",
+        }
+        with patch.object(precheck, "dispatch_private_tracker", return_value=(True, 204)) as mock_sun_skip:
+            _, events_sun_skip, changed_sun_skip = precheck.evaluate_ranking_dispatches(
+                now_brt=_brt_dt(2026, 11, 29, 10, 0),
+                prev_state=prev_sun_done,
+                tracker_token="tok_tracker",
+            )
+        self.assertFalse(changed_sun_skip)
+        self.assertEqual(events_sun_skip, [])
+        mock_sun_skip.assert_not_called()
+
+        # Recuperacao no domingo 11:59 BRT quando sabado nao rodou -> dispara normalmente!
+        prev_sun_missed = {
+            "last_ranking_daily_date": "2026-11-29",
+            "last_ranking_slot": "2026-11-29-00",
+            "last_ranking_bg_slot": "2026-W47",
+        }
+        with patch.object(precheck, "dispatch_private_tracker", return_value=(True, 204)) as mock_sun_rec:
+            markers_rec, events_rec, changed_rec = precheck.evaluate_ranking_dispatches(
+                now_brt=_brt_dt(2026, 11, 29, 11, 59),
+                prev_state=prev_sun_missed,
+                tracker_token="tok_tracker",
+            )
+        self.assertTrue(changed_rec)
+        self.assertEqual(markers_rec["last_ranking_bg_slot"], "2026-W48")
+        self.assertEqual(len(events_rec), 1)
+        mock_sun_rec.assert_called_once()
+
+        # Domingo 12:00 BRT mesmo sem ter rodado no sabado -> nao dispara (janela encerrada)
+        with patch.object(precheck, "dispatch_private_tracker", return_value=(True, 204)) as mock_sun_late:
+            _, events_late, changed_late = precheck.evaluate_ranking_dispatches(
+                now_brt=_brt_dt(2026, 11, 29, 12, 0),
+                prev_state={
+                    "last_ranking_daily_date": "2026-11-29",
+                    "last_ranking_slot": "2026-11-29-12",
+                    "last_ranking_bg_slot": "2026-W47",
+                },
+                tracker_token="tok_tracker",
+            )
+        self.assertFalse(changed_late)
+        self.assertEqual(events_late, [])
+        mock_sun_late.assert_not_called()
+
+    def test_ranking_token_priority_fallback_retry_and_tracker_preserves_markers(self) -> None:
+        import json
+        from datetime import datetime
+
+        self.assertEqual(precheck.resolve_ranking_dispatch_token("rank_tok", "trk_tok"), "rank_tok")
+        self.assertEqual(precheck.resolve_ranking_dispatch_token("", "trk_tok"), "trk_tok")
+        self.assertEqual(precheck.resolve_ranking_dispatch_token("   ", "trk_tok"), "trk_tok")
+
+        precheck.MONITORED_PROFILES = ((79327, "Chacineiro"),)
+        precheck.MONITORED_PID_SET = frozenset({79327})
+        t_0805 = int(datetime(2026, 11, 24, 8, 5, 0, tzinfo=precheck.BRT_TZ).timestamp())
+
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "last_dispatch_ts": t_0805 - 600,
+                        "last_ranking_slot": "2026-11-24-00",
+                        "last_ranking_bg_slot": "2026-W47",
+                        "players": {"79327": {"max_match_id": 500, "max_completion_time": t_0805 - 3600}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            # 1) Falha HTTP 500 no ranking usando RANKING_DISPATCH_TOKEN -> marcador NAO avanca
+            with (
+                patch.object(precheck.time, "time", return_value=t_0805),
+                patch.object(
+                    precheck,
+                    "fetch_latest_player_marker",
+                    return_value=(79327, 500, t_0805 - 3600, True, 500, t_0805 - 3600),
+                ),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=(set(), t_0805, True)),
+                patch.object(precheck, "dispatch_private_tracker", return_value=(False, 500)) as mock_fail,
+            ):
+                _, _, _, meta_fail = precheck.evaluate_precheck(
+                    state_path=state_path,
+                    dispatch_token="tok_tracker",
+                    ranking_token="tok_ranking_dedicated",
+                )
+            self.assertFalse(meta_fail["state_persisted"])
+            self.assertEqual(meta_fail["ranking_dispatches_failed"], 1)
+            self.assertEqual(meta_fail["ranking_dispatches"][0]["token_source"], "RANKING_DISPATCH_TOKEN")
+            mock_fail.assert_called_once_with(
+                token="tok_ranking_dedicated",
+                owner="nigosky",
+                repo="coh3-br-ranking",
+                workflow="boletim_diario.yml",
+                ref="main",
+                inputs=None,
+            )
+            self.assertEqual(precheck.load_state(state_path).get("last_ranking_daily_date", ""), "")
+
+            # 2) Proximo ciclo sem RANKING_DISPATCH_TOKEN -> fallback automatico para TRACKER_DISPATCH_TOKEN e sucesso!
+            with (
+                patch.object(precheck.time, "time", return_value=t_0805 + 300),
+                patch.object(
+                    precheck,
+                    "fetch_latest_player_marker",
+                    return_value=(79327, 500, t_0805 - 3600, True, 500, t_0805 - 3600),
+                ),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=(set(), t_0805 + 300, True)),
+                patch.object(precheck, "dispatch_private_tracker", return_value=(True, 204)) as mock_ok,
+            ):
+                _, _, _, meta_ok = precheck.evaluate_precheck(
+                    state_path=state_path,
+                    dispatch_token="tok_tracker_fallback",
+                    ranking_token="",
+                )
+            self.assertTrue(meta_ok["state_persisted"])
+            self.assertEqual(meta_ok["ranking_dispatches"][0]["token_source"], "TRACKER_DISPATCH_TOKEN (fallback)")
+            mock_ok.assert_called_once_with(
+                token="tok_tracker_fallback",
+                owner="nigosky",
+                repo="coh3-br-ranking",
+                workflow="boletim_diario.yml",
+                ref="main",
+                inputs=None,
+            )
+
+            # 3) Disparo posterior do tracker (nova partida) preserva os 3 marcadores de ranking em state.json!
+            with (
+                patch.object(precheck.time, "time", return_value=t_0805 + 600),
+                patch.object(
+                    precheck,
+                    "fetch_latest_player_marker",
+                    return_value=(79327, 501, t_0805 + 500, True, 501, t_0805 + 500),
+                ),
+                patch.object(precheck, "fetch_veteranos_radar_active_pids", return_value=(set(), t_0805 + 600, True)),
+                patch.object(precheck, "dispatch_private_tracker", return_value=(True, 204)) as mock_trk,
+            ):
+                should_trk, ok_trk, _, meta_trk = precheck.evaluate_precheck(
+                    state_path=state_path,
+                    dispatch_token="tok_tracker_only",
+                    ranking_token="tok_ranking_dedicated",
+                )
+            self.assertTrue(should_trk and ok_trk)
+            self.assertEqual(meta_trk["ranking_dispatches"], [])
+            mock_trk.assert_called_once_with(
+                token="tok_tracker_only",
+                owner="nigosky",
+                repo="coh3-br-tracker",
+                workflow="coh3_monitor.yml",
+                ref="main",
+            )
+            saved_after_trk = precheck.load_state(state_path)
+            self.assertEqual(saved_after_trk["last_ranking_daily_date"], "2026-11-24")
+            self.assertEqual(saved_after_trk["last_ranking_slot"], "2026-11-24-00")
+            self.assertEqual(saved_after_trk["last_ranking_bg_slot"], "2026-W47")
+            self.assertEqual(saved_after_trk["players"]["79327"]["max_match_id"], 501)
+
+    def test_ranking_token_redaction_and_scheduler_workflow_secret_gate(self) -> None:
+        import re
+        import subprocess
+
+        fake_rank_tok = "rank_secret_" + ("9" * 16)
+        scrubbed = precheck.redact_secrets(f"env RANKING_DISPATCH_TOKEN={fake_rank_tok} ok")
+        self.assertNotIn(fake_rank_tok, scrubbed)
+        self.assertIn("RANKING_DISPATCH_TOKEN=[SECRET_REDACTED]", scrubbed)
+
+        repo_root = Path(__file__).resolve().parent
+        wf_path = repo_root / ".github" / "workflows" / "scheduler.yml"
+        wf_text = wf_path.read_text(encoding="utf-8")
+        self.assertIn("RANKING_DISPATCH_TOKEN: ${{ secrets.RANKING_DISPATCH_TOKEN }}", wf_text)
+        m = re.search(r'SECRET_PATTERN="([^"]+)"', wf_text)
+        self.assertIsNotNone(m, "SECRET_PATTERN nao encontrado em scheduler.yml")
+        pattern = m.group(1)  # type: ignore[union-attr]
+
+        # Valida com o mesmo grep -Ei usado no gate de CI (POSIX ERE)
+        for sample in (
+            "RANKING_DISPATCH_TOKEN=" + ("A" * 20),
+            "TRACKER_DISPATCH_TOKEN=" + ("B" * 20),
+        ):
+            proc = subprocess.run(
+                ["grep", "-Ei", pattern],
+                input=sample,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, msg=f"SECRET_PATTERN nao bloqueou: {sample!r}")
+
+        # Garante que os arquivos-fonte do repositorio nao disparam falso positivo no gate anti-vazamento
+        clean_proc = subprocess.run(
+            ["grep", "-InEi", pattern, str(repo_root / "precheck.py"), str(repo_root / "test_precheck.py"), str(wf_path)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(clean_proc.returncode, 1, msg=f"Falso positivo no gate anti-vazamento:\n{clean_proc.stdout}")
+
 
 if __name__ == "__main__":
     unittest.main()
