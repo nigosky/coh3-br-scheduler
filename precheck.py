@@ -139,7 +139,6 @@ FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (1097608, "Winter Animal"),
     (975688, "Kefbr"),
     (1390350, "TearsInTheRain (Smurf: Chacineiro)"),
-    (1076221, "Lucielle (Smurf: Colossus)"),
     (1119784, "Tracker"),
 )
 
@@ -189,7 +188,6 @@ FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561199498421192": 1097608,  # Winter Animal
     "76561197994245218": 975688,   # Kefbr
     "76561198089278659": 1390350,  # TearsInTheRain (Smurf: Chacineiro)
-    "76561198815935562": 1076221,  # Lucielle (Smurf: Colossus)
     "76561198000067932": 1119784,  # Tracker
 }
 
