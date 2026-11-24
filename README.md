@@ -23,3 +23,8 @@ Agendador público inteligente (`Self-Relay` 5 em 5 min + pré-checagem via `pre
 2. Salve o token nos Secrets deste repositório público ([link direto](https://github.com/nigosky/coh3-br-scheduler/settings/secrets/actions/new)):
    - **`TRACKER_DISPATCH_TOKEN`** *(obrigatório)*: usado para `coh3-br-tracker` e como fallback automático para `coh3-br-ranking` caso `RANKING_DISPATCH_TOKEN` não esteja definido.
    - **`RANKING_DISPATCH_TOKEN`** *(opcional)*: se configurado, é usado com prioridade exclusiva para os workflows de `nigosky/coh3-br-ranking`.
+
+## Auto-Recuperação (`watchdog.yml`) e Segurança
+
+- **Watchdog Dead-Man's Switch (`.github/workflows/watchdog.yml`):** roda isolado a cada 30 min (`17,47 * * * *`) sem checkout e sem PATs (`permissions: actions: write`), religando automaticamente `scheduler.yml` caso uma sessão seja cancelada pela infraestrutura do GitHub Actions. Para pausar a cadeia intencionalmente, defina a variável de repositório `SCHEDULER_AUTO_RELAY_ENABLED=false`.
+- **Performance e Hardening:** pool HTTP/1.1 Keep-Alive stdlib com TLS 1.2+ (reduz ciclos de 48 contas para ~3s sem handshakes redundantes), cache ETag/`304 Not Modified`, circuit breaker de 30 min para quedas da Relic, `actions/checkout` fixado por SHA com `persist-credentials: false`, push de `state.json` com `GIT_ASKPASS` efêmero + merge JSON monotônico (`--merge-state`), bloqueio de proxy/redirect/Gzip-bomb/AST-DoS e gate anti-vazamento (`grep -IlEi`).
