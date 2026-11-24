@@ -20,14 +20,16 @@ class TestSchedulerSharedRoster(unittest.TestCase):
         precheck._LAST_FETCHED_STEAM_ID_TO_PID = {}
 
     def test_fallback_profiles_and_steam_map_stay_aligned(self) -> None:
-        self.assertEqual(len(precheck.FALLBACK_MONITORED_PROFILES), 43)
-        self.assertEqual(len(precheck.FALLBACK_STEAM_ID_TO_PID), 43)
+        self.assertEqual(len(precheck.FALLBACK_MONITORED_PROFILES), 44)
+        self.assertEqual(len(precheck.FALLBACK_STEAM_ID_TO_PID), 44)
         self.assertEqual(precheck.LOCAL_MERGED_ACCOUNT_FALLBACKS, ())
         self.assertEqual(
             set(precheck.FALLBACK_STEAM_ID_TO_PID.values()),
             {pid for pid, _ in precheck.FALLBACK_MONITORED_PROFILES},
         )
         by_pid = dict(precheck.FALLBACK_MONITORED_PROFILES)
+        self.assertEqual(by_pid.get(1119784), "Tracker")
+        self.assertEqual(precheck.FALLBACK_STEAM_ID_TO_PID.get("76561198000067932"), 1119784)
         expected_smurfs = {
             1333418: ("76561198698969876", "Charles Bronson (Smurf: Chacineiro)"),
             557890: ("76561199538846112", "gabe44arg (Smurf: Gabe)"),
