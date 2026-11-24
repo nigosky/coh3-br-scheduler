@@ -52,10 +52,12 @@ HEARTBEAT_INTERVAL_SEC = 3 * 3600  # Garante 1 disparo de segurança a cada 3h (
 QUIET_PERSONAL_STAT_AUDIT_SEC = 3600  # Após 1h sem partidas, varre getPersonalStat em 100% do elenco a cada 1h
 QUIET_STAT_TOLERANCE_SEC = 60  # Margem segura acima do drift normal (+1s) do lastmatchdate da Relic
 QUIET_STAT_RECENT_WINDOW_SEC = 72 * 3600  # Considera apenas partidas recentes (<=72h) na auditoria silenciosa
-AUTOMATCH_TYPE_IDS: frozenset[int] = frozenset({1, 2, 3, 4, 20, 21, 22, 23})  # 1v1..4v4 Automatch CoH3 (exclui Custom=0)
-BG_FOLLOWUP_FRESH_MATCH_SEC = 300  # Partida Automatch encerrada há <5 min pode ainda estar sendo parseada no cohdb.com
-BG_FOLLOWUP_DELAY_SEC = 240  # Agenda 1 disparo único de confirmação no próximo ciclo de 5 min (+4-5 min)
-BG_FOLLOWUP_TTL_SEC = 2700  # Descarta agendamento se ficar obsoleto (>45 min)
+AUTOMATCH_TYPE_IDS: frozenset[int] = frozenset({1, 2, 3, 4, 20, 21, 22, 23})  # 1v1..4v4 Automatch CoH3
+BG_ELIGIBLE_TYPE_IDS: frozenset[int] = AUTOMATCH_TYPE_IDS | frozenset({0})  # Automatch + Custom (mt=0); exclui Co-Op vs IA
+BG_FOLLOWUP_FRESH_MATCH_SEC = 600  # Partida Automatch/Custom encerrada há <10 min pode ainda estar sendo parseada no cohdb.com
+BG_FOLLOWUP_DELAY_SEC = 240  # Onda 1: disparo de confirmação no próximo ciclo de 5 min (+4-5 min)
+BG_FOLLOWUP_WAVE2_DELAY_SEC = 1500  # Onda 2: segunda confirmação ~25-30 min após a partida (cobre atraso em Custom)
+BG_FOLLOWUP_TTL_SEC = 3600  # Descarta agendamento se ficar obsoleto (>60 min)
 
 URL_FORBIDDEN_CHARS_RE = re.compile(r"[\x00-\x20\x7f]")
 URL_PATH_TRAVERSAL_RE = re.compile(r"(?:^|/)\.\.(?:/|$)|%2e%2e|%5c|\\", re.IGNORECASE)
@@ -571,7 +573,7 @@ def fetch_personal_stat_last_match(pids: list[int]) -> dict[int, int]:
 
 
 def fetch_latest_player_marker(profile_id: int) -> tuple[int, int, int, bool, int, int]:
-    """Retorna (profile_id, max_match_id, max_completion_time, ok, max_automatch_id, max_automatch_ct) para uma conta monitorada."""
+    """Retorna (profile_id, max_match_id, max_completion_time, ok, max_bg_eligible_id, max_bg_eligible_ct) para uma conta monitorada."""
     pid = int(profile_id)
     if pid <= 0:
         return pid, 0, 0, False, 0, 0
@@ -604,7 +606,7 @@ def fetch_latest_player_marker(profile_id: int) -> tuple[int, int, int, bool, in
                     max_mid = mid
                 if ct > max_ct:
                     max_ct = ct
-                if mt_id in AUTOMATCH_TYPE_IDS:
+                if mt_id in BG_ELIGIBLE_TYPE_IDS:
                     if mid > max_auto_mid:
                         max_auto_mid = mid
                     if ct > max_auto_ct:
@@ -745,6 +747,7 @@ def evaluate_precheck(
     last_weekly_week = str(prev.get("last_weekly_summary_iso_week") or "")
     prev_bg_due_ts = int(prev.get("pending_bg_followup_due_ts", 0) or 0)
     prev_bg_match_id = int(prev.get("pending_bg_followup_match_id", 0) or 0)
+    prev_bg_wave = int(prev.get("pending_bg_followup_wave", 0) or 0)
     prev_full_audit_ts = max(
         int(prev.get("last_full_stat_audit_ts", 0) or 0),
         int(last_full_stat_audit_ts_override or 0),
@@ -890,9 +893,11 @@ def evaluate_precheck(
         and now_ts >= prev_bg_due_ts
         and (now_ts - prev_bg_due_ts) <= BG_FOLLOWUP_TTL_SEC
     )
+    active_bg_wave = prev_bg_wave if prev_bg_wave in (1, 2) else 1
     if bg_followup_due and not new_activity_players and not radar_stat_triggers and not quiet_stat_triggers:
         mid_hint = f" #{prev_bg_match_id}" if prev_bg_match_id > 0 else ""
-        reasons.append(f"confirmacao de Battlegroups cohdb (+5 min apos partida{mid_hint})")
+        delay_hint = "+5 min" if active_bg_wave == 1 else "+30 min"
+        reasons.append(f"confirmacao de Battlegroups cohdb (onda {active_bg_wave}/2, {delay_hint} apos partida{mid_hint})")
     if now_brt.weekday() == 0 and (now_brt.hour, now_brt.minute) >= (0, 5) and last_weekly_week != current_iso_week:
         reasons.append(f"janela do Resumo Semanal ({current_iso_week} segunda >= 00:05 BRT)")
         mark_weekly_done = True
@@ -933,12 +938,19 @@ def evaluate_precheck(
         if fresh_automatch_mid > 0 or radar_stat_triggers or quiet_stat_triggers:
             next_bg_due_ts = now_ts + BG_FOLLOWUP_DELAY_SEC
             next_bg_mid = fresh_automatch_mid
+            next_bg_wave = 1
+        elif bg_followup_due and active_bg_wave == 1:
+            next_bg_due_ts = now_ts + BG_FOLLOWUP_WAVE2_DELAY_SEC
+            next_bg_mid = prev_bg_match_id
+            next_bg_wave = 2
         elif prev_bg_due_ts > 0 and now_ts < (prev_bg_due_ts - 60):
             next_bg_due_ts = prev_bg_due_ts
             next_bg_mid = prev_bg_match_id
+            next_bg_wave = active_bg_wave
         else:
             next_bg_due_ts = 0
             next_bg_mid = 0
+            next_bg_wave = 0
         next_state = {
             "schema_version": 2,
             "last_checked_ts": now_ts,
@@ -947,6 +959,7 @@ def evaluate_precheck(
             "last_weekly_summary_iso_week": current_iso_week if mark_weekly_done else last_weekly_week,
             "pending_bg_followup_due_ts": next_bg_due_ts,
             "pending_bg_followup_match_id": next_bg_mid,
+            "pending_bg_followup_wave": next_bg_wave,
             "radar_coh3_pids": sorted(curr_radar_pids) if radar_ok else sorted(prev_radar_pids),
             "radar_last_sync_ts": radar_sync_ts if radar_ok else int(prev.get("radar_last_sync_ts", 0) or 0),
             "players": updated_players,
