@@ -644,7 +644,7 @@ class TestSchedulerSharedRoster(unittest.TestCase):
             self.assertFalse(meta3["state_persisted"])
             mock_disp_skip.assert_not_called()
 
-    def test_ranking_unified_twice_daily_slots_and_force_update_false_input(self) -> None:
+    def test_ranking_unified_daily_slot_no_midday_and_force_update_false_input(self) -> None:
         import json
         from datetime import datetime
 
@@ -656,8 +656,8 @@ class TestSchedulerSharedRoster(unittest.TestCase):
         self.assertEqual(precheck.get_ranking_unified_slot(_brt_dt(2026, 11, 24, 11, 59)), "2026-11-24-00")
         self.assertEqual(precheck.get_ranking_unified_slot(_brt_dt(2026, 11, 24, 12, 0)), "")
         self.assertEqual(precheck.get_ranking_unified_slot(_brt_dt(2026, 11, 24, 12, 1)), "")
-        self.assertEqual(precheck.get_ranking_unified_slot(_brt_dt(2026, 11, 24, 12, 2)), "2026-11-24-12")
-        self.assertEqual(precheck.get_ranking_unified_slot(_brt_dt(2026, 11, 24, 23, 59)), "2026-11-24-12")
+        self.assertEqual(precheck.get_ranking_unified_slot(_brt_dt(2026, 11, 24, 12, 2)), "")
+        self.assertEqual(precheck.get_ranking_unified_slot(_brt_dt(2026, 11, 24, 23, 59)), "")
 
         precheck.MONITORED_PROFILES = ((79327, "Chacineiro"),)
         precheck.MONITORED_PID_SET = frozenset({79327})
@@ -671,6 +671,7 @@ class TestSchedulerSharedRoster(unittest.TestCase):
                         "schema_version": 2,
                         "last_dispatch_ts": t_0002 - 600,
                         "last_ranking_daily_date": "2026-11-24",
+                        "last_ranking_slot": "2026-11-23-12",  # compatibilidade com marcador legado -12 do dia anterior
                         "players": {"79327": {"max_match_id": 500, "max_completion_time": t_0002 - 3600}},
                     }
                 ),
@@ -704,7 +705,7 @@ class TestSchedulerSharedRoster(unittest.TestCase):
             )
             self.assertEqual(precheck.load_state(state_path)["last_ranking_slot"], "2026-11-24-00")
 
-            # 12:02 BRT -> dispara slot 12 com inputs {"force_update": false}
+            # 12:02 BRT -> slot do meio-dia removido (evita disparo ocioso bloqueado no coh3-br-ranking)
             t_1202 = int(_brt_dt(2026, 11, 24, 12, 2).timestamp())
             st_mid = precheck.load_state(state_path)
             st_mid["last_dispatch_ts"] = t_1202 - 600  # mantem tracker em SKIP (sem heartbeat 3h)
@@ -725,16 +726,10 @@ class TestSchedulerSharedRoster(unittest.TestCase):
                     dispatch_token="tok_tracker",
                 )
             self.assertFalse(should_disp2)
-            self.assertTrue(meta2["state_persisted"])
-            mock_disp2.assert_called_once_with(
-                token="tok_tracker",
-                owner="nigosky",
-                repo="coh3-br-ranking",
-                workflow="ranking_unificado.yml",
-                ref="main",
-                inputs={"force_update": False},
-            )
-            self.assertEqual(precheck.load_state(state_path)["last_ranking_slot"], "2026-11-24-12")
+            self.assertFalse(meta2["state_persisted"])
+            self.assertEqual(meta2["ranking_dispatches"], [])
+            mock_disp2.assert_not_called()
+            self.assertEqual(precheck.load_state(state_path)["last_ranking_slot"], "2026-11-24-00")
 
     def test_ranking_battlegroup_champions_saturday_and_sunday_recovery_window(self) -> None:
         from datetime import datetime

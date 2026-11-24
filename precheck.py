@@ -10,7 +10,7 @@ autônoma de 60 minutos (12 ciclos) e dispara (`workflow_dispatch`):
   em janelas de confirmação de Battlegroups, Resumo Semanal ou heartbeat de 3h;
 - `nigosky/coh3-br-ranking`:
   1. `boletim_diario.yml` (todo dia >= 08:03 BRT)
-  2. `ranking_unificado.yml` (2x/dia >= 00:02 BRT e >= 12:02 BRT, `{"force_update": false}`)
+  2. `ranking_unificado.yml` (1x/dia >= 00:02 BRT até 11:59 BRT, `{"force_update": false}`)
   3. `campeoes_battlegroups.yml` (sábado >= 12:05 BRT, janela de recuperação até domingo 11:59 BRT)
 
 Resultado:
@@ -150,13 +150,11 @@ def get_ranking_daily_date(now_brt: datetime) -> str:
 
 
 def get_ranking_unified_slot(now_brt: datetime) -> str:
-    """Retorna o slot 2x/dia do Ranking Unificado + Times 2v2 (00:02 BRT e 12:02 BRT), ou '' fora da janela."""
+    """Retorna o slot diário do Ranking Unificado + Times 2v2 (00:02 BRT até 11:59 BRT), ou '' fora da janela."""
     date_str = now_brt.strftime("%Y-%m-%d")
     hm = (now_brt.hour, now_brt.minute)
     if (0, 2) <= hm < (12, 0):
         return f"{date_str}-00"
-    if hm >= (12, 2):
-        return f"{date_str}-12"
     return ""
 
 
@@ -1114,7 +1112,7 @@ def evaluate_ranking_dispatches(
     """
     Avalia e dispara os 3 workflows agendados de `nigosky/coh3-br-ranking`:
     1. Boletim Diário + Jogo do Dia (`boletim_diario.yml`) >= 08:03 BRT (`last_ranking_daily_date`)
-    2. Ranking Unificado + Times 2v2 (`ranking_unificado.yml`) >= 00:02 e >= 12:02 BRT (`last_ranking_slot`)
+    2. Ranking Unificado + Times 2v2 (`ranking_unificado.yml`) 1x/dia >= 00:02 até 11:59 BRT (`last_ranking_slot`)
     3. Campeões BR por Battlegroup (`campeoes_battlegroups.yml`) sáb >= 12:05 até dom 11:59 BRT (`last_ranking_bg_slot`)
 
     Retorna `(next_markers, events, state_changed)`.
