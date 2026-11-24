@@ -5,7 +5,7 @@ Agendador público inteligente (`Self-Relay` 5 em 5 min + pré-checagem via `pre
 - **[`nigosky/coh3-br-tracker`](https://github.com/nigosky/coh3-br-tracker)** (`coh3_monitor.yml`): somente quando há partida nova (ranqueada ou customizada), confirmação de Battlegroups, janela do Resumo Semanal (`segunda-feira >= 00:05 BRT`) ou heartbeat de segurança de 3h.
 - **[`nigosky/coh3-br-ranking`](https://github.com/nigosky/coh3-br-ranking)**:
   - **Boletim Diário + Jogo do Dia** (`boletim_diario.yml`): todo dia a partir das `08:03 BRT` (`last_ranking_daily_date`).
-  - **Ranking Unificado + Times 2v2** (`ranking_unificado.yml`): 2x/dia a partir das `00:02 BRT` e `12:02 BRT`, com `inputs={"force_update": false}` (`last_ranking_slot`).
+  - **Ranking Unificado + Times 2v2** (`ranking_unificado.yml`): 1x/dia a partir das `00:02 BRT` (janela até `11:59 BRT`), com `inputs={"force_update": false}` (`last_ranking_slot`).
   - **Campeões BR por Battlegroup** (`campeoes_battlegroups.yml`): todo sábado a partir das `12:05 BRT`, com janela de recuperação até domingo `11:59 BRT` (`last_ranking_bg_slot`).
 
 - **Minutos no repositório público (`coh3-br-scheduler`):** gratuitos e ilimitados no GitHub Actions.
