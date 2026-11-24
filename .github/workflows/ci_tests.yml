@@ -1,0 +1,28 @@
+name: CI — Testes Automatizados e Segurança
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  test-and-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout seguro (SHA imutavel)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validar sintaxe e executar suite de testes (precheck e seguranca)
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          python3 -m py_compile *.py
+          python3 -W error::ResourceWarning -m unittest discover -s . -p "test_*.py" -v
