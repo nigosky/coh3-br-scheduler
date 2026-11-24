@@ -93,7 +93,7 @@ def redact_secrets(text: Any) -> str:
     return AUTH_HEADER_REDACT_RE.sub(r"\1[AUTH_REDACTED]", scrubbed)
 
 
-# Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível (44 contas)
+# Fallback embutido caso players_roster.json (base única compartilhada) esteja temporariamente inacessível (46 contas)
 FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (79327, "Chacineiro"),
     (1333418, "Charles Bronson (Smurf: Chacineiro)"),
@@ -127,6 +127,7 @@ FALLBACK_MONITORED_PROFILES: tuple[tuple[int, str], ...] = (
     (1005730, "arc"),
     (1423426, "geladeira velha (Smurf: arc)"),
     (1487738, "Državljan H (Smurf: arc)"),
+    (1482961, "Vog (Smurf: arc)"),
     (31145, "vonMises"),
     (58737, "INFIEL"),
     (431802, "Conflict.BR"),
@@ -176,6 +177,7 @@ FALLBACK_STEAM_ID_TO_PID: dict[str, int] = {
     "76561199791811246": 1005730,  # arc
     "76561199482388323": 1423426,  # geladeira velha (Smurf: arc)
     "76561198602236177": 1487738,  # Državljan H (Smurf: arc)
+    "76561199886227102": 1482961,  # Vog (Smurf: arc)
     "76561197985268629": 31145,    # vonMises
     "76561197993922195": 58737,    # INFIEL
     "76561198000099422": 431802,   # Conflict.BR
