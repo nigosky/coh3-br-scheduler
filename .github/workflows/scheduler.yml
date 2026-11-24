@@ -56,10 +56,17 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
           TRACKER_DISPATCH_TOKEN: ${{ secrets.TRACKER_DISPATCH_TOKEN }}
+          RANKING_DISPATCH_TOKEN: ${{ secrets.RANKING_DISPATCH_TOKEN }}
           TARGET_OWNER: "nigosky"
           TARGET_REPO: "coh3-br-tracker"
           TARGET_WORKFLOW: "coh3_monitor.yml"
           TARGET_REF: "main"
+          RANKING_TARGET_OWNER: "nigosky"
+          RANKING_TARGET_REPO: "coh3-br-ranking"
+          RANKING_TARGET_REF: "main"
+          RANKING_DAILY_WORKFLOW: "boletim_diario.yml"
+          RANKING_UNIFIED_WORKFLOW: "ranking_unificado.yml"
+          RANKING_BG_WORKFLOW: "campeoes_battlegroups.yml"
           FORCE_DISPATCH: ${{ (github.event_name == 'workflow_dispatch' && inputs.force_dispatch) || false }}
           RELAY_ENABLED_VAR: ${{ vars.SCHEDULER_AUTO_RELAY_ENABLED }}
           RELAY_CYCLES_VAR: ${{ vars.SCHEDULER_RELAY_CYCLES }}
@@ -87,7 +94,7 @@ jobs:
           set -euo pipefail
 
           # Bloqueia qualquer padrao de token GitHub/Discord/Steam/dispatch/Authorization/chave privada em TODOS os arquivos rastreados
-          SECRET_PATTERN="(ptb\.|canary\.)?discord(app)?\.com/api/(v[0-9]+/)?webhooks/[0-9]+|STEAM_WEB_API_KEY=[A-Za-z0-9]{16,}|x-webapi-key[:=][[:space:]]*[A-Za-z0-9]{16,}|[?&]key=[A-Za-z0-9]{16,}|TRACKER_DISPATCH_TOKEN=[A-Za-z0-9_.-]{16,}|Authorization:[[:space:]]*(Bearer|Basic|Token)[[:space:]]+[A-Za-z0-9._-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+          SECRET_PATTERN="(ptb\.|canary\.)?discord(app)?\.com/api/(v[0-9]+/)?webhooks/[0-9]+|STEAM_WEB_API_KEY=[A-Za-z0-9]{16,}|x-webapi-key[:=][[:space:]]*[A-Za-z0-9]{16,}|[?&]key=[A-Za-z0-9]{16,}|(TRACKER|RANKING)_DISPATCH_TOKEN=[A-Za-z0-9_.-]{16,}|Authorization:[[:space:]]*(Bearer|Basic|Token)[[:space:]]+[A-Za-z0-9._-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
           if git ls-files -z | xargs -0 grep -InEi "${SECRET_PATTERN}" 2>/dev/null; then
             echo "::error::Bloqueio de seguranca acionado: padrao de credencial detectado em arquivo rastreado!"
             exit 1
@@ -171,6 +178,7 @@ jobs:
         env:
           TOTAL_CYCLES: ${{ steps.precheck.outputs.total_cycles }}
           DISPATCHES_COUNT: ${{ steps.precheck.outputs.dispatches_count }}
+          RANKING_DISPATCHES_COUNT: ${{ steps.precheck.outputs.ranking_dispatches_count }}
           SKIPS_COUNT: ${{ steps.precheck.outputs.skips_count }}
           OK_ACCOUNTS: ${{ steps.precheck.outputs.ok_accounts }}
           SUMMARY_REASON: ${{ steps.precheck.outputs.summary_reason }}
@@ -182,7 +190,7 @@ jobs:
               echo "### CoH3 BR Smart Scheduler — Sessão Autônoma (5 em 5 min)"
               echo "- **Encerramento (BRT):** ${BRT_NOW} (${UTC_NOW})"
               echo "- **Contas verificadas na Relic:** \`${OK_ACCOUNTS:-N/D}\`"
-              echo "- **Ciclos executados:** \`${TOTAL_CYCLES:-0}\` (🟢 Disparos: \`${DISPATCHES_COUNT:-0}\` | 💤 Economizados: \`${SKIPS_COUNT:-0}\`)"
+              echo "- **Ciclos executados:** \`${TOTAL_CYCLES:-0}\` (🟢 Tracker: \`${DISPATCHES_COUNT:-0}\` | 🏆 Ranking: \`${RANKING_DISPATCHES_COUNT:-0}\` | 💤 Economizados: \`${SKIPS_COUNT:-0}\`)"
               echo "- **Resumo:** ${SUMMARY_REASON:-N/D}"
             } >> "${GITHUB_STEP_SUMMARY}"
           fi
