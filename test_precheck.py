@@ -20,8 +20,8 @@ class TestSchedulerSharedRoster(unittest.TestCase):
         precheck._LAST_FETCHED_STEAM_ID_TO_PID = {}
 
     def test_fallback_profiles_and_steam_map_stay_aligned(self) -> None:
-        self.assertEqual(len(precheck.FALLBACK_MONITORED_PROFILES), 45)
-        self.assertEqual(len(precheck.FALLBACK_STEAM_ID_TO_PID), 45)
+        self.assertEqual(len(precheck.FALLBACK_MONITORED_PROFILES), 48)
+        self.assertEqual(len(precheck.FALLBACK_STEAM_ID_TO_PID), 48)
         self.assertEqual(precheck.LOCAL_MERGED_ACCOUNT_FALLBACKS, ())
         self.assertEqual(
             set(precheck.FALLBACK_STEAM_ID_TO_PID.values()),
@@ -36,6 +36,9 @@ class TestSchedulerSharedRoster(unittest.TestCase):
             1423426: ("76561199482388323", "geladeira velha (Smurf: arc)"),
             1487738: ("76561198602236177", "Državljan H (Smurf: arc)"),
             1482961: ("76561199886227102", "Vog (Smurf: arc)"),
+            917917: ("76561198287157768", "arc (Smurf: arc)"),
+            1160699: ("76561199814547622", "Bubebolos (Smurf: arc)"),
+            918241: ("76561199794093952", "Faint (Smurf: arc)"),
             1390350: ("76561198089278659", "TearsInTheRain (Smurf: Chacineiro)"),
         }
         for spid, (expected_sid, expected_alias) in expected_smurfs.items():
