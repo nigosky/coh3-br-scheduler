@@ -20,8 +20,8 @@ class TestSchedulerSharedRoster(unittest.TestCase):
         precheck._LAST_FETCHED_STEAM_ID_TO_PID = {}
 
     def test_fallback_profiles_and_steam_map_stay_aligned(self) -> None:
-        self.assertEqual(len(precheck.FALLBACK_MONITORED_PROFILES), 46)
-        self.assertEqual(len(precheck.FALLBACK_STEAM_ID_TO_PID), 46)
+        self.assertEqual(len(precheck.FALLBACK_MONITORED_PROFILES), 45)
+        self.assertEqual(len(precheck.FALLBACK_STEAM_ID_TO_PID), 45)
         self.assertEqual(precheck.LOCAL_MERGED_ACCOUNT_FALLBACKS, ())
         self.assertEqual(
             set(precheck.FALLBACK_STEAM_ID_TO_PID.values()),
@@ -37,12 +37,11 @@ class TestSchedulerSharedRoster(unittest.TestCase):
             1487738: ("76561198602236177", "Državljan H (Smurf: arc)"),
             1482961: ("76561199886227102", "Vog (Smurf: arc)"),
             1390350: ("76561198089278659", "TearsInTheRain (Smurf: Chacineiro)"),
-            1076221: ("76561198815935562", "Lucielle (Smurf: Colossus)"),
         }
         for spid, (expected_sid, expected_alias) in expected_smurfs.items():
             self.assertEqual(precheck.FALLBACK_STEAM_ID_TO_PID.get(expected_sid), spid)
             self.assertEqual(by_pid.get(spid), expected_alias)
-        for moved_pid in (19747, 23250, 28937, 81751, 3895, 462597, 1297821, 1318162, 509690, 1297853, 844225, 1297804, 164152):
+        for moved_pid in (19747, 23250, 28937, 81751, 3895, 462597, 1297821, 1318162, 509690, 1297853, 844225, 1297804, 164152, 1076221):
             self.assertNotIn(moved_pid, precheck.MONITORED_PID_SET)
 
     def test_parse_shared_roster_profiles_reads_veteranos_only_and_tags_secondary(self) -> None:
@@ -58,8 +57,9 @@ class TestSchedulerSharedRoster(unittest.TestCase):
                 },
                 {"profile_id": 975688, "steam_id": "76561197994245218", "original_alias": "Kefbr", "in_ranking": False},
             ],
-            "manual_other_br": [
+            "monitorados": [
                 {"profile_id": 33487, "steam_id": "76561197995712470", "original_alias": "Generick", "country": "us"},
+                {"profile_id": 164152, "steam_id": "76561198029749621", "original_alias": "Sgt.Yoda", "country": "br"},
             ],
         }
         parsed, sid_map = precheck.parse_shared_roster_details(payload)
