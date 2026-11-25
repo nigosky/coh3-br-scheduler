@@ -1,13 +1,13 @@
 {
-  "last_checked_ts": 1795562881,
-  "last_dispatch_ts": 1795562881,
+  "last_checked_ts": 1795566197,
+  "last_dispatch_ts": 1795566197,
   "last_full_stat_audit_ts": 1795529625,
   "last_ranking_bg_slot": "",
   "last_ranking_daily_date": "2026-11-24",
   "last_ranking_slot": "2026-11-24-12",
   "last_weekly_summary_iso_week": "2026-W48",
-  "pending_bg_followup_due_ts": 1795564381,
-  "pending_bg_followup_match_id": 92819697,
+  "pending_bg_followup_due_ts": 1795567697,
+  "pending_bg_followup_match_id": 92821108,
   "pending_bg_followup_wave": 2,
   "players": {
     "1005730": {
@@ -21,14 +21,14 @@
       "max_stat_lmd": 1795559182
     },
     "1088455": {
-      "max_completion_time": 1795561880,
-      "max_match_id": 92818592,
-      "max_stat_lmd": 1795561880
+      "max_completion_time": 1795565721,
+      "max_match_id": 92821108,
+      "max_stat_lmd": 1795565721
     },
     "1097608": {
-      "max_completion_time": 1795492061,
-      "max_match_id": 92726139,
-      "max_stat_lmd": 1795492061
+      "max_completion_time": 1795565786,
+      "max_match_id": 92820963,
+      "max_stat_lmd": 1795565786
     },
     "110078": {
       "max_completion_time": 1795485512,
@@ -61,9 +61,9 @@
       "max_stat_lmd": 1795213615
     },
     "1282592": {
-      "max_completion_time": 1795482361,
-      "max_match_id": 92719082,
-      "max_stat_lmd": 1795482361
+      "max_completion_time": 1795565786,
+      "max_match_id": 92820963,
+      "max_stat_lmd": 1795565786
     },
     "1333418": {
       "max_completion_time": 1795524299,
@@ -116,9 +116,9 @@
       "max_stat_lmd": 1748181998
     },
     "31145": {
-      "max_completion_time": 1795562346,
-      "max_match_id": 92819697,
-      "max_stat_lmd": 1795562346
+      "max_completion_time": 1795564762,
+      "max_match_id": 92820221,
+      "max_stat_lmd": 1795564762
     },
     "32922": {
       "max_completion_time": 1794703560,
@@ -136,9 +136,9 @@
       "max_stat_lmd": 1794450126
     },
     "366826": {
-      "max_completion_time": 1795562346,
-      "max_match_id": 92819697,
-      "max_stat_lmd": 1795562346
+      "max_completion_time": 1795564762,
+      "max_match_id": 92820221,
+      "max_stat_lmd": 1795564762
     },
     "431802": {
       "max_completion_time": 1788390907,
@@ -181,9 +181,9 @@
       "max_stat_lmd": 1795561305
     },
     "648514": {
-      "max_completion_time": 1795561880,
-      "max_match_id": 92818592,
-      "max_stat_lmd": 1795561880
+      "max_completion_time": 1795565721,
+      "max_match_id": 92821108,
+      "max_stat_lmd": 1795565721
     },
     "6557": {
       "max_completion_time": 1795489119,
@@ -253,7 +253,6 @@
   },
   "radar_coh3_pids": [
     31145,
-    79327,
     337051,
     366826,
     639157,
@@ -261,6 +260,6 @@
     1088455,
     1097608
   ],
-  "radar_last_sync_ts": 1795562695,
+  "radar_last_sync_ts": 1795565775,
   "schema_version": 2
 }
