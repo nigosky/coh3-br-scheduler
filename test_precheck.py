@@ -1535,6 +1535,95 @@ class TestSchedulerSharedRoster(unittest.TestCase):
             for pat in secret_patterns:
                 self.assertIsNone(pat.search(content), msg=f"Possível segredo detectado em arquivo público: {rel}")
 
+    def test_actions_cache_git_checkpoint_policy_and_cli(self) -> None:
+        import json
+        import shutil
+        import subprocess
+        import sys
+
+        # 1) Janela de expiracao do Radar alinha com checkpoint silencioso de 6h + folga de 1h (7h = 25200s)
+        self.assertEqual(precheck.RADAR_MAX_AGE_SEC, 25200)
+        self.assertEqual(precheck.DEFAULT_GIT_CHECKPOINT_INTERVAL_SEC, 43200)
+
+        base = {
+            "schema_version": 2,
+            "last_checked_ts": 100_000,
+            "last_dispatch_ts": 99_500,
+            "last_weekly_summary_iso_week": "2026-W48",
+            "last_ranking_daily_date": "2026-11-24",
+            "last_ranking_slot": "2026-11-24-12",
+            "last_ranking_bg_slot": "2026-W47",
+            "players": {"79327": {"max_match_id": 500, "max_completion_time": 99_000}},
+        }
+        quiet = dict(base, last_checked_ts=100_000 + 3600, last_dispatch_ts=100_000 + 3600)
+
+        should_push, reason = precheck.evaluate_git_checkpoint(base, quiet)
+        self.assertFalse(should_push)
+        self.assertIn("actions_cache_only", reason)
+
+        self.assertEqual(precheck.evaluate_git_checkpoint(base, quiet, force=True), (True, "force_dispatch"))
+        self.assertEqual(precheck.evaluate_git_checkpoint({}, quiet), (True, "initial_baseline"))
+        self.assertEqual(precheck.evaluate_git_checkpoint(base, {}), (False, "empty_local_state"))
+
+        for key, new_val in (
+            ("last_weekly_summary_iso_week", "2026-W49"),
+            ("last_ranking_daily_date", "2026-11-25"),
+            ("last_ranking_slot", "2026-11-25-00"),
+            ("last_ranking_bg_slot", "2026-W48"),
+        ):
+            mutated = dict(quiet, **{key: new_val})
+            self.assertEqual(precheck.evaluate_git_checkpoint(base, mutated), (True, f"marker_changed_{key}"))
+
+        elapsed_12h = dict(base, last_checked_ts=100_000 + 43200)
+        should_12h, reason_12h = precheck.evaluate_git_checkpoint(base, elapsed_12h)
+        self.assertTrue(should_12h)
+        self.assertIn("periodic_checkpoint_elapsed", reason_12h)
+
+        # 2) CLI --check-git-checkpoint end-to-end (skip=10, push=0, symlink=1)
+        src_script = Path(__file__).resolve().parent / "precheck.py"
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            tmp_script = td_path / "precheck.py"
+            shutil.copy2(src_script, tmp_script)
+            (td_path / "state.json").write_text(json.dumps(quiet), encoding="utf-8")
+            baseline_file = td_path / "baseline.json"
+            baseline_file.write_text(json.dumps(base), encoding="utf-8")
+
+            proc_skip = subprocess.run(
+                [sys.executable, str(tmp_script), "--check-git-checkpoint", str(baseline_file)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc_skip.returncode, precheck.GIT_CHECKPOINT_SKIP_EXIT_CODE, msg=proc_skip.stderr)
+            self.assertIn("should_push=false", proc_skip.stdout)
+
+            proc_force = subprocess.run(
+                [sys.executable, str(tmp_script), "--check-git-checkpoint", str(baseline_file), "--force"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc_force.returncode, 0, msg=proc_force.stderr)
+            self.assertIn("should_push=true", proc_force.stdout)
+
+            link_base = td_path / "link_base.json"
+            os.symlink(baseline_file, link_base)
+            proc_bad = subprocess.run(
+                [sys.executable, str(tmp_script), "--check-git-checkpoint", str(link_base)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc_bad.returncode, 1)
+
+        # 3) Workflow scheduler.yml usa Actions Cache pinado por SHA, gate prep_cache e --check-git-checkpoint
+        wf_text = (Path(__file__).resolve().parent / ".github" / "workflows" / "scheduler.yml").read_text(encoding="utf-8")
+        self.assertIn("actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9", wf_text)
+        self.assertIn("actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9", wf_text)
+        self.assertIn("--check-git-checkpoint", wf_text)
+        self.assertIn("steps.prep_cache.outputs.has_snapshot == 'true'", wf_text)
+
 
 if __name__ == "__main__":
     unittest.main()

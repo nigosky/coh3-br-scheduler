@@ -45,12 +45,37 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Restaurar state.json intermediario do GitHub Actions Cache (privado)
+        id: restore_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/scheduler_state_cache
+          key: scheduler-state-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            scheduler-state-v1-
+
       - name: Validar testes da base compartilhada e pre-checagem
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           set -euo pipefail
           python3 -m unittest discover -s . -p "test_*.py" -v
+
+      - name: Mesclar state.json restaurado do Actions Cache com baseline da main
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/scheduler_state_cache"
+          if [ -f "state.json" ] && [ ! -L "state.json" ]; then
+            cp -f -- state.json "${RUNNER_TEMP}/git_baseline_state.json"
+          else
+            printf '{}\n' > "${RUNNER_TEMP}/git_baseline_state.json"
+          fi
+          if [ -f "${RUNNER_TEMP}/scheduler_state_cache/state.json" ] && [ ! -L "${RUNNER_TEMP}/scheduler_state_cache/state.json" ]; then
+            python3 precheck.py --merge-state "${RUNNER_TEMP}/scheduler_state_cache/state.json"
+            echo "state.json mesclado monotonicamente a partir do Actions Cache privado."
+          fi
 
       - name: Pre-checagem continua a cada 5 min na API da Relic (12 ciclos = 60 min)
         id: precheck
@@ -89,11 +114,51 @@ jobs:
 
           python3 precheck.py --loop-cycles "${CYCLES}" --loop-interval-sec 300 --max-session-sec 3660
 
-      - name: Auditoria anti-vazamento e persistencia monotonica de state.json
+      - name: Auditoria anti-vazamento e preparo do snapshot de state.json para Actions Cache
+        id: prep_cache
         if: always()
         env:
           PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+
+          SECRET_PATTERN="(ptb\.|canary\.)?discord(app)?\.com/api/(v[0-9]+/)?webhooks/[0-9]+|STEAM_WEB_API_KEY=[A-Za-z0-9]{16,}|x-webapi-key[:=][[:space:]]*[A-Za-z0-9]{16,}|[?&]key=[A-Za-z0-9]{16,}|(TRACKER|RANKING)_DISPATCH_TOKEN=[A-Za-z0-9_.-]{16,}|Authorization:[[:space:]]*(Bearer|Basic|Token)[[:space:]]+[A-Za-z0-9._-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+          matched="$(git ls-files -z | xargs -0 grep -IlEi "${SECRET_PATTERN}" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//' || true)"
+          if [ -n "${matched}" ]; then
+            echo "::error::Bloqueio de seguranca acionado: padrao de credencial detectado em arquivo rastreado (${matched})!"
+            exit 1
+          fi
+
+          if [ ! -f "state.json" ] || [ -L "state.json" ]; then
+            echo "state.json ausente ou symlink bloqueado; pulando cache."
+            echo "has_snapshot=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          STATE_BYTES="$(wc -c < state.json)"
+          if [ "${STATE_BYTES}" -gt 262144 ] || ! python3 -m json.tool state.json >/dev/null; then
+            echo "::error::Bloqueio de integridade: state.json invalido ou acima de 256 KB (${STATE_BYTES} bytes)!"
+            exit 1
+          fi
+
+          mkdir -p "${RUNNER_TEMP}/scheduler_state_cache"
+          cp -f -- state.json "${RUNNER_TEMP}/scheduler_state_cache/state.json"
+          echo "has_snapshot=true" >> "${GITHUB_OUTPUT}"
+
+      - name: Salvar state.json intermediario no GitHub Actions Cache (privado, zero PushEvent)
+        if: always() && steps.prep_cache.outcome == 'success' && steps.prep_cache.outputs.has_snapshot == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/scheduler_state_cache
+          key: scheduler-state-v1-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Checkpoint condicional de state.json na main (slot diario/semanal ou a cada 12h)
+        if: always() && steps.prep_cache.outcome == 'success' && steps.prep_cache.outputs.has_snapshot == 'true'
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_DISPATCH: ${{ (github.event_name == 'workflow_dispatch' && inputs.force_dispatch) || false }}
+          CHECKPOINT_SEC_VAR: ${{ vars.SCHEDULER_GIT_CHECKPOINT_SEC }}
         run: |
           set -euo pipefail
 
@@ -114,6 +179,24 @@ jobs:
           if [ ! -f "state.json" ] || [ -L "state.json" ]; then
             echo "state.json ausente ou symlink bloqueado; pulando persistencia."
             exit 0
+          fi
+
+          CHECKPOINT_SEC=43200
+          if [[ "${CHECKPOINT_SEC_VAR:-}" =~ ^[0-9]+$ ]] && [ "${CHECKPOINT_SEC_VAR}" -ge 300 ] && [ "${CHECKPOINT_SEC_VAR}" -le 86400 ]; then
+            CHECKPOINT_SEC="${CHECKPOINT_SEC_VAR}"
+          fi
+
+          set +e
+          CKPT_OUT="$(python3 precheck.py --check-git-checkpoint "${RUNNER_TEMP}/git_baseline_state.json" --checkpoint-interval-sec "${CHECKPOINT_SEC}")"
+          CKPT_RC=$?
+          set -e
+          echo "[GIT CHECKPOINT] ${CKPT_OUT}"
+          if [ "${CKPT_RC}" -eq 10 ]; then
+            echo "Push na main economizado: state.json persistido apenas no GitHub Actions Cache privado."
+            exit 0
+          elif [ "${CKPT_RC}" -ne 0 ]; then
+            echo "::error::Erro ao avaliar checkpoint git (rc=${CKPT_RC})."
+            exit "${CKPT_RC}"
           fi
 
           if git diff --quiet -- state.json; then
@@ -174,9 +257,9 @@ jobs:
               break
             fi
 
-            git commit -m "chore(precheck): atualizar marcador de partidas [skip ci]"
+            git commit -m "chore(precheck): checkpoint de marcador de partidas [skip ci]"
             if git push origin "HEAD:main"; then
-              echo "state.json salvo com sucesso em main (tentativa ${attempt}/3)."
+              echo "Checkpoint de state.json salvo com sucesso em main (tentativa ${attempt}/3)."
               PUSH_OK=1
               break
             fi

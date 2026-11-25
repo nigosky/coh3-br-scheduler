@@ -63,7 +63,9 @@ RANKING_UNIFIED_INPUTS: dict[str, Any] = {"force_update": False}
 MAX_HTTP_BYTES = 5 * 1024 * 1024  # 5 MB limite estrito anti-Gzip-bomb
 MAX_RADAR_BYTES = 256 * 1024  # 256 KB limite estrito para state.json e players_roster.json
 MAX_AST_NESTING_DEPTH = 16  # Limite estrito anti-DoS para ast.literal_eval em payloads externos
-RADAR_MAX_AGE_SEC = 7200  # Ignora estado do Radar se estiver há >2h sem sincronizar
+RADAR_MAX_AGE_SEC = 25200  # Ignora estado do Radar se estiver há >7h sem checkpoint (cobre ciclo silencioso de 6h + folga)
+DEFAULT_GIT_CHECKPOINT_INTERVAL_SEC = 12 * 3600  # Persiste backup de state.json no git a cada 12h (intermediários via Actions Cache)
+GIT_CHECKPOINT_SKIP_EXIT_CODE = 10  # Código de saída controlado quando o estado fica apenas no Actions Cache privado
 BRT_TZ = timezone(timedelta(hours=-3))
 HEARTBEAT_INTERVAL_SEC = 3 * 3600  # Garante 1 disparo de segurança a cada 3h (auditoria profunda, limpeza 72h, Open Data)
 RELIC_OUTAGE_FALLBACK_COOLDOWN_SEC = 1800  # Circuit breaker: durante queda total da Relic, limita fallback a 1x/30 min
@@ -1297,6 +1299,56 @@ def merge_states_monotonic(remote_state: dict[str, Any], local_state: dict[str, 
     }
 
 
+def evaluate_git_checkpoint(
+    git_state: dict[str, Any],
+    local_state: dict[str, Any],
+    *,
+    min_interval_sec: int = DEFAULT_GIT_CHECKPOINT_INTERVAL_SEC,
+    force: bool = False,
+) -> tuple[bool, str]:
+    """
+    Decide se a sessão deve fazer `git commit/push` em `main` (checkpoint público de backup) ou manter
+    o `state.json` intermediário apenas no GitHub Actions Cache privado (reduzindo pushes e clones de bots).
+
+    Faz checkpoint em `main` quando:
+    - `force=True` (`workflow_dispatch` forçado);
+    - não há baseline anterior no git;
+    - qualquer marcador diário/semanal de ranking/resumo mudou (evita duplicidade mesmo se o cache expirar);
+    - já passaram `>= min_interval_sec` (padrão 12h) desde o último checkpoint commitado em `main`.
+    """
+    if force:
+        return True, "force_dispatch"
+    if not isinstance(local_state, dict) or not local_state:
+        return False, "empty_local_state"
+    if not isinstance(git_state, dict) or not git_state:
+        return True, "initial_baseline"
+
+    for key in (
+        "last_weekly_summary_iso_week",
+        "last_ranking_daily_date",
+        "last_ranking_slot",
+        "last_ranking_bg_slot",
+    ):
+        if str(git_state.get(key) or "").strip() != str(local_state.get(key) or "").strip():
+            return True, f"marker_changed_{key}"
+
+    git_ts = max(
+        int(git_state.get("last_checked_ts", 0) or 0),
+        int(git_state.get("last_dispatch_ts", 0) or 0),
+    )
+    local_ts = max(
+        int(local_state.get("last_checked_ts", 0) or 0),
+        int(local_state.get("last_dispatch_ts", 0) or 0),
+    )
+    interval = max(300, int(min_interval_sec))
+    elapsed = local_ts - git_ts
+    if git_ts <= 0 or elapsed >= interval:
+        return True, f"periodic_checkpoint_elapsed_{max(0, elapsed)}s"
+
+    remaining_min = max(1, (interval - max(0, elapsed) + 59) // 60)
+    return False, f"actions_cache_only_next_git_checkpoint_in_{remaining_min}m"
+
+
 def write_github_outputs(outputs: dict[str, str]) -> None:
     gh_out = os.environ.get("GITHUB_OUTPUT", "").strip()
     if not gh_out:
@@ -1657,6 +1709,18 @@ def main() -> int:
         default="",
         help="Mescla monotonicamente um snapshot local JSON com o state.json atual e encerra",
     )
+    parser.add_argument(
+        "--check-git-checkpoint",
+        type=str,
+        default="",
+        help="Compara state.json atual com snapshot baseline da main; retorna 0 se deve commitar ou 10 se deve manter so no Actions Cache",
+    )
+    parser.add_argument(
+        "--checkpoint-interval-sec",
+        type=int,
+        default=DEFAULT_GIT_CHECKPOINT_INTERVAL_SEC,
+        help="Intervalo periodico em segundos para checkpoint de backup no git (padrao 43200 = 12h)",
+    )
     args = parser.parse_args()
 
     repo_dir = Path(__file__).resolve().parent
@@ -1675,6 +1739,22 @@ def main() -> int:
         merged = merge_states_monotonic(remote_state, local_state)
         atomic_write_json(state_path, merged)
         return 0
+
+    if args.check_git_checkpoint:
+        baseline_path = Path(args.check_git_checkpoint)
+        if baseline_path.is_symlink():
+            print("::error::Arquivo baseline symlink bloqueado.", flush=True)
+            return 1
+        git_state = load_state(baseline_path) if baseline_path.is_file() else {}
+        local_state = load_state(state_path)
+        should_push, reason = evaluate_git_checkpoint(
+            git_state,
+            local_state,
+            min_interval_sec=max(300, int(args.checkpoint_interval_sec or DEFAULT_GIT_CHECKPOINT_INTERVAL_SEC)),
+            force=bool(args.force or (os.environ.get("FORCE_DISPATCH", "false").strip().lower() == "true")),
+        )
+        print(f"should_push={str(should_push).lower()} reason={reason}", flush=True)
+        return 0 if should_push else GIT_CHECKPOINT_SKIP_EXIT_CODE
 
     cycles = max(1, min(24, int(args.loop_cycles)))
     interval_sec = max(30, min(900, int(args.loop_interval_sec)))
